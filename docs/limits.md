@@ -114,8 +114,8 @@ each STREAM frame it sent, and the rate of frames is what bounds it:
   second with all 32 directions of 16 sessions under attack.
   `GOMEMLIMIT=8500MiB` is reached after about 100 s from an idle relay.
   (These two figures and the 1160 are arithmetic from the packet size,
-  not a new measurement; the heap table below was measured with
-  kolo-transport v0.1.3 and its 1280-byte packets.)
+  not a measurement; the heap table below was measured with
+  1280-byte packets.)
 - Over a session, frames are bounded by about 1000 writes per second for
   `MaxSessionDuration` (3.6 million) plus one extra frame per 1241 bytes
   of `MaxSessionBytes` (0.87 million). Mixing 1-byte writes and writes
@@ -200,7 +200,7 @@ used as given, so it sets every listener field:
 
 This gives 5 × 14.2 MiB + 4 × 42.9 MiB + 6 MiB + 1.8 MiB, about 250 MiB
 of live heap. The same kind of attack measured 85 to 88 MiB with it in
-three runs, with the 16 KiB copy buffer and 10s `ControlTimeout` of an earlier version. Run it with `GOMEMLIMIT=300MiB`. Each byte of
+three runs, with a 16 KiB copy buffer and a 10s `ControlTimeout`. Run it with `GOMEMLIMIT=300MiB`. Each byte of
 `MaxConnReceiveWindow` costs 176 heap bytes on every connection (14.2
 MiB per connection at 64 KiB, 47.2 MiB at 256 KiB), and each session
 about 92 MiB (its two sending connections and one frame map).

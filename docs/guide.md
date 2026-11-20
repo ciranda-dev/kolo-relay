@@ -54,7 +54,7 @@ Client:
   `Context` is canceled when the connection ends for any reason,
   including the relay ending the session.
 - A nil or zero identity is `ErrInvalidArgument`.
-- v0.1.x is IPv4 only and IPv6 input is refused: an IPv6 address
+- kolo-relay is IPv4 only and IPv6 input is refused: an IPv6 address
   given to `Listen`, `Reserve` or `Dial`, v4-mapped included, is
   `ErrInvalidArgument` before anything is sent, and a kolo-transport
   `Network` other than `"udp4"` in `Config` or `ServerConfig` is
