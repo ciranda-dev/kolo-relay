@@ -18,6 +18,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- **Breaking:** `ServerConfig.MaxReservations` defaults to (listener `MaxConns` - `MaxSessions`) / 2, at least 1, instead of 64: 56 at the default listener, and it grows with `MaxConns`, so a relay no longer needs the reservation count set apart from the connection count. A relay with a bigger `MaxConns` can now hold more than 64 reservations without setting it; one with a smaller `MaxConns` holds fewer. A positive value is still an operator cap.
+- `ServerConfig.MaxReservations` has no maximum (it was 100000); a reservation lives on its client's connection, so `MaxConns` bounds it.
 - The default relay listener (`ServerConfig.Secure` nil) offers QUIC datagrams (`Transport.Datagrams`); clients opt in: the default client connection to the relay (`Config.Relay` nil) does not, so it speaks version 0, and an application sets `Transport.Datagrams` in a non-nil `Config.Relay` to use the datagram path. A non-nil config is used as given. The measurement showed no goodput gain under 1% loss and 1.6 times without loss at the relay's 64 KiB window (docs/limits.md).
 - The end-to-end connection never offers QUIC datagrams of its own: `Transport.Datagrams` in `Config.Peer` is ignored, since its packets already travel as datagrams or frames to the relay.
 

@@ -12,7 +12,7 @@ The defaults suit a trial on a host with about 8 GiB (the worst-case heap below 
 | Option | Default | Range | Why |
 |---|---|---|---|
 | `Secure` (the relay's kolo-secure listener) | nil: the listener rows below | any `*kolosecure.Config`, used as given | Protocol: a non-nil one sets every listener field. |
-| `MaxReservations` | 64 | 1 to 100000 | Security: it bounds the table a flood of free keys fills. |
+| `MaxReservations` | 0: (listener `MaxConns` - `MaxSessions`) / 2, at least 1; 56 at the defaults | 1 and up, no maximum | Security: it bounds the table a flood of free keys fills. A reservation lives on its client's connection, so the table cannot outgrow `MaxConns`, whose memory is measured below; the default is the sizing rule of "Sizing a relay for a swarm" solved for reservations. A positive value is an operator cap, and a cap above `MaxConns` has no effect. To raise it, raise `MaxConns` (and the memory it needs) in `Secure`. |
 | `MaxSessions` (being set up or open) | 16 | 1 to 10000 | Memory: it bounds the egress (2 × `MaxSessions` × `RateBytes`) and the send term of the heap. |
 | `MaxSessionsPerPeer` (started by one key) | 4, or `MaxSessions` if lower | 1 to `MaxSessions` | Security: one key cannot take every session. |
 | `MaxSessionsPerTarget` (towards one reserved key) | 8, or `MaxSessions` if lower | 1 to `MaxSessions` | Security: one target cannot be flooded with sessions. |
@@ -156,7 +156,7 @@ relay. The test fails if a measurement is above its bound.
 | send, per connection | 18.3 MiB | 32.6 MiB | 16.9 MiB | 32.6 MiB | 42.9 MiB |
 | both at once | 897.8 MiB | 1089.2 MiB | 639.1 MiB | 1100.4 MiB | 7538.3 MiB |
 
-- Idle: 64 reservations (`MaxReservations`).
+- Idle: 64 reservations (`MaxReservations` set to 64, the default before the derived one, to keep the runs comparable).
 - Receive: 16 initiators and 4 targets with 4 sessions each, so each
   target's 256 KiB connection window is full. Every session stream is
   full of 1-byte frames (147 to 159 heap bytes per byte of window). Then
@@ -374,19 +374,20 @@ fails. From that, with no new default:
   dial. A member that lists several relays reserves at all of them, so
   each relay counts every member that lists it, but only the sessions
   whose dial stopped there.
-- So set `MaxReservations` to at least the announcing members online
-  that list the relay; `MaxSessions` to at least the pairs relayed here;
+- So set `MaxSessions` to at least the pairs relayed here;
   `MaxSessionsPerPeer` and `MaxSessionsPerTarget` to at least the
   relayed partners of one member; the listener's `MaxConns` to at least
-  2 × reservations plus sessions; and the listener's `MaxConnsPerIP` to
+  2 × the announcing members online that list the relay plus
+  `MaxSessions`, which the default `MaxReservations` then follows
+  (leave it 0 unless you want a lower cap); and the listener's `MaxConnsPerIP` to
   at least (2 + relayed partners it starts here) × the members behind one
   address. Raising the listener values needs a non-nil `Secure` with
   every listener field set.
-- At the defaults that is 64 members, 16 relayed pairs, at most 4
+- At the defaults that is 56 members, 16 relayed pairs, at most 4
   partners started by one key, and 4 connections per address: one member
   behind an address gets its reservation and 3 sessions it starts, and
   people behind one home NAT or a carrier-grade NAT share those 4. With
-  `AllowReserve` nil, 16 addresses can take all 64 reservations.
+  `AllowReserve` nil, 14 addresses can take all 56 reservations.
 - A call of N people in which every pair is relayed here needs
   N(N-1)/2 sessions and N-1 per key.
 - At the default `RateBytes` a session reaches `MaxSessionBytes` in

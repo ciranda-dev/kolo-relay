@@ -23,7 +23,7 @@ func TestServerConfigDefaults(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := ServerConfig{
-			MaxReservations:      64,
+			MaxReservations:      56,
 			MaxSessions:          16,
 			MaxSessionsPerPeer:   4,
 			MaxSessionsPerTarget: 8,
@@ -62,6 +62,35 @@ func TestServerConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestServerConfigReservationsFollowConns(t *testing.T) {
+	secure := func(conns int) *kolosecure.Config {
+		return &kolosecure.Config{Transport: &kolotransport.Config{MaxConns: conns}}
+	}
+	cases := []struct {
+		name string
+		cfg  ServerConfig
+		want int
+	}{
+		{"defaults", ServerConfig{}, 56},
+		{"raised MaxConns", ServerConfig{Secure: secure(1000)}, 492},
+		{"raised MaxSessions", ServerConfig{Secure: secure(1000), MaxSessions: 100}, 450},
+		{"kolo-transport default MaxConns", ServerConfig{Secure: &kolosecure.Config{}}, 42},
+		{"MaxConns near MaxSessions", ServerConfig{Secure: secure(20)}, 2},
+		{"MaxConns below MaxSessions", ServerConfig{Secure: secure(10)}, 1},
+		{"operator cap below", ServerConfig{Secure: secure(1000), MaxReservations: 7}, 7},
+		{"operator cap above MaxConns", ServerConfig{MaxReservations: 200000}, 200000},
+	}
+	for _, c := range cases {
+		got, err := c.cfg.withDefaults()
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got.MaxReservations != c.want {
+			t.Errorf("%s: MaxReservations %d, want %d", c.name, got.MaxReservations, c.want)
+		}
+	}
+}
+
 func TestServerConfigPerPeerDefaultsFollowMaxSessions(t *testing.T) {
 	for _, c := range []struct{ sessions, peer, target int }{{1, 1, 1}, {2, 2, 2}, {6, 4, 6}, {16, 4, 8}, {10000, 4, 8}} {
 		got, err := (&ServerConfig{MaxSessions: c.sessions}).withDefaults()
@@ -79,7 +108,6 @@ func TestServerConfigRanges(t *testing.T) {
 		name string
 		cfg  ServerConfig
 	}{
-		{"MaxReservations", ServerConfig{MaxReservations: 100001}},
 		{"MaxReservations", ServerConfig{MaxReservations: -1}},
 		{"MaxSessions", ServerConfig{MaxSessions: 10001}},
 		{"MaxSessionsPerPeer", ServerConfig{MaxSessions: 4, MaxSessionsPerPeer: 5}},
@@ -119,7 +147,7 @@ func TestServerConfigBounds(t *testing.T) {
 		RateBytes: 16 << 10, RateBurst: 16 << 10, FlushInterval: 100 * time.Microsecond,
 	}
 	high := ServerConfig{
-		MaxReservations: 100000, MaxSessions: 10000, MaxSessionsPerPeer: 10000, MaxSessionsPerTarget: 10000,
+		MaxReservations: 1000000, MaxSessions: 10000, MaxSessionsPerPeer: 10000, MaxSessionsPerTarget: 10000,
 		ReservationLifetime: 24 * time.Hour, MaxSessionDuration: 24 * time.Hour, MaxSessionBytes: 1 << 40,
 		SessionIdleTimeout: 10 * time.Minute, ConnectTimeout: time.Minute, ControlTimeout: time.Minute,
 		RateBytes: 1 << 30, RateBurst: 64 << 20, FlushInterval: 100 * time.Millisecond,
@@ -159,7 +187,7 @@ func TestServerConfigInternal(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := c.tableConfig()
-	if l.MaxReservations != 64 || l.MaxSessions != 16 || l.MaxSessionsPerPeer != 4 || l.MaxSessionsPerTarget != 8 {
+	if l.MaxReservations != 56 || l.MaxSessions != 16 || l.MaxSessionsPerPeer != 4 || l.MaxSessionsPerTarget != 8 {
 		t.Fatalf("table config %+v", l)
 	}
 	s := c.spliceLimits()
