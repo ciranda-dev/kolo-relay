@@ -266,8 +266,10 @@ type fakeRelay struct {
 	addr string
 	key  ed25519.PublicKey
 
-	conns   atomic.Int64
-	refused atomic.Int64
+	conns     atomic.Int64
+	refused   atomic.Int64
+	forwarded atomic.Int64 // datagrams relayed in version 1
+	dg        bool         // speaks version 1: relays datagrams between datagram clients
 
 	mu      sync.Mutex
 	targets map[string]*kolosecure.Conn
@@ -278,11 +280,15 @@ type fakeRelay struct {
 	cancel  context.CancelFunc
 }
 
-func startFake(t *testing.T, mode int) *fakeRelay {
+func startFake(t *testing.T, mode int) *fakeRelay { return startFakeWith(t, mode, false) }
+
+// startFakeWith starts a fake relay; with datagrams it offers them and carries the session in version 1, as clients
+// built with datagramClient ask for.
+func startFakeWith(t *testing.T, mode int, datagrams bool) *fakeRelay {
 	t.Helper()
 	id := newID(t)
 	var cfg *kolosecure.Config
-	if mode == fakeVersion0 || mode == fakeNoVersion {
+	if mode == fakeVersion0 || mode == fakeNoVersion || datagrams {
 		cfg = &kolosecure.Config{Transport: &kolotransport.Config{Datagrams: true}}
 	}
 	sl, err := kolosecure.Listen(testCtx(t), "127.0.0.1:0", id, cfg)
@@ -290,7 +296,7 @@ func startFake(t *testing.T, mode int) *fakeRelay {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	f := &fakeRelay{t: t, sl: sl, id: id, mid: newID(t), mode: mode, addr: sl.Addr().String(), key: id.PublicKey(),
+	f := &fakeRelay{t: t, sl: sl, id: id, mid: newID(t), mode: mode, dg: datagrams, addr: sl.Addr().String(), key: id.PublicKey(),
 		targets: make(map[string]*kolosecure.Conn), results: make(chan error, 4), ctx: ctx, cancel: cancel}
 	f.wg.Go(f.loop)
 	t.Cleanup(func() {
@@ -355,23 +361,48 @@ func (f *fakeRelay) handle(c *kolosecure.Conn) {
 	c.Close()
 }
 
-func (f *fakeRelay) open(target []byte, announce []byte) *kolotransport.Stream {
+// open announces announce to target and returns the session stream and the target's relay connection.
+func (f *fakeRelay) open(target []byte, announce []byte) (*kolotransport.Stream, *kolosecure.Conn) {
 	f.mu.Lock()
 	tc := f.targets[string(target)]
 	f.mu.Unlock()
 	if tc == nil {
-		return nil
+		return nil, nil
 	}
 	ts, err := tc.OpenStream(f.ctx)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	wire.WriteMessage(ts, wire.EncodeIncoming(wire.Version0, announce))
+	version := uint64(wire.Version0)
+	if f.dg {
+		version = wire.Version1
+	}
+	wire.WriteMessage(ts, wire.EncodeIncoming(version, announce))
 	body, err := wire.ReadMessage(ts)
 	if m, derr := wire.Decode(body); err != nil || derr != nil || m.Code != wire.StatusOK {
-		return nil
+		return nil, nil
 	}
-	return ts
+	return ts, tc
+}
+
+// pump moves the datagrams of session stream fromID on from to session stream toID on to, and records their packets.
+func (f *fakeRelay) pump(ctx context.Context, from, to *kolosecure.Conn, fromID, toID uint64) {
+	for {
+		b, err := from.ReceiveDatagram(ctx)
+		if err != nil {
+			return
+		}
+		id, p, err := wire.DecodeDatagram(b)
+		if err != nil || id != fromID {
+			continue
+		}
+		f.mu.Lock()
+		f.seen.Write(p)
+		f.mu.Unlock()
+		if out, err := wire.AppendDatagram(nil, toID, p); err == nil && to.SendDatagram(out) == nil {
+			f.forwarded.Add(1)
+		}
+	}
 }
 
 func (f *fakeRelay) connect(c *kolosecure.Conn, st *kolotransport.Stream, target []byte) {
@@ -394,9 +425,15 @@ func (f *fakeRelay) connect(c *kolosecure.Conn, st *kolotransport.Stream, target
 		<-c.Context().Done()
 		return
 	}
-	ts := f.open(target, announce)
+	ts, tc := f.open(target, announce)
 	if ts == nil {
 		return
+	}
+	if f.dg {
+		ctx, cancel := context.WithCancel(f.ctx)
+		defer cancel()
+		f.wg.Go(func() { f.pump(ctx, c, tc, quarterID(st), quarterID(ts)) })
+		f.wg.Go(func() { f.pump(ctx, tc, c, quarterID(ts), quarterID(st)) })
 	}
 	wire.WriteMessage(st, wire.EncodeStatus(wire.StatusOK))
 	var wg sync.WaitGroup
@@ -435,7 +472,7 @@ func (f *fakeRelay) connect(c *kolosecure.Conn, st *kolotransport.Stream, target
 
 // mitm runs its own end-to-end sessions: as the listener towards the dialer, and as a dialer claiming the initiator's key towards the target.
 func (f *fakeRelay) mitm(c *kolosecure.Conn, st *kolotransport.Stream, target, initiator []byte) {
-	ts := f.open(target, initiator)
+	ts, trc := f.open(target, initiator)
 	if ts == nil {
 		return
 	}
@@ -445,10 +482,19 @@ func (f *fakeRelay) mitm(c *kolosecure.Conn, st *kolotransport.Stream, target, i
 		f.results <- err
 		return
 	}
+	var rtd, rtt *router
+	if f.dg {
+		if rtd, rtt = newRouter(c), newRouter(trc); rtd == nil || rtt == nil {
+			f.results <- errors.New("no datagrams")
+			return
+		}
+		go rtd.run()
+		go rtt.run()
+	}
 	ctx, cancel := context.WithTimeout(f.ctx, 20*time.Second)
 	defer cancel()
 
-	towardDialer, err := kolotransport.ListenConn(ctx, pconn.New(st, la, ra, 64, nil), &kolotransport.Config{MaxConns: 1})
+	towardDialer, err := kolotransport.ListenConn(ctx, sessionConn(st, rtd, c, la, ra, 64), &kolotransport.Config{MaxConns: 1})
 	if err != nil {
 		f.results <- err
 		return
@@ -460,7 +506,7 @@ func (f *fakeRelay) mitm(c *kolosecure.Conn, st *kolotransport.Stream, target, i
 	}
 	defer sd.Close()
 	deny := &kolotransport.Config{MaxConns: 1, AcceptFunc: func(netip.AddrPort) bool { return false }}
-	towardTarget, err := kolotransport.ListenConn(ctx, pconn.New(ts, la, ra, 64, nil), deny)
+	towardTarget, err := kolotransport.ListenConn(ctx, sessionConn(ts, rtt, trc, la, ra, 64), deny)
 	if err != nil {
 		f.results <- err
 		return
@@ -501,7 +547,7 @@ func (f *fakeRelay) recorded() []byte {
 // forward runs kolo-secure's dialer side towards the target by hand, claiming the initiator's key,
 // and replays the target's proof to the dialer, whose own session has another exporter.
 func (f *fakeRelay) forward(c *kolosecure.Conn, st *kolotransport.Stream, target, initiator []byte) {
-	ts := f.open(target, initiator)
+	ts, _ := f.open(target, initiator)
 	if ts == nil {
 		return
 	}
@@ -619,6 +665,22 @@ func (s *signalStream) Write(p []byte) (int, error) {
 	default:
 	}
 	return n, err
+}
+
+// eachTransport runs f with the default clients against a version 0 fake relay, then with datagram clients against a
+// version 1 one.
+func eachTransport(t *testing.T, f func(t *testing.T, datagrams bool, cfg *Config)) {
+	t.Helper()
+	for _, c := range []struct {
+		name      string
+		datagrams bool
+		cfg       *Config
+	}{{"frames", false, nil}, {"datagrams", true, datagramClient()}} {
+		t.Run(c.name, func(t *testing.T) {
+			checkGoroutines(t)
+			f(t, c.datagrams, c.cfg)
+		})
+	}
 }
 
 // hookAt makes the relay call f at the named point (see Server.at) for the rest of the test.
