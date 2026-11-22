@@ -50,6 +50,7 @@ func TestServerConfigDefaults(t *testing.T) {
 			MaxIncomingStreams:     2,
 			MaxStreamReceiveWindow: 64 << 10,
 			MaxConnReceiveWindow:   256 << 10,
+			Datagrams:              true,
 		}
 		if got := *c.Secure.Transport; !reflect.DeepEqual(got, wantT) || c.Secure.HandshakeTimeout != 0 || c.Secure.MaxPending != 0 {
 			t.Fatalf("relay listener %+v, transport %+v, want transport %+v", c.Secure, got, wantT)
@@ -226,7 +227,7 @@ func TestConfigInner(t *testing.T) {
 	user := &kolosecure.Config{
 		HandshakeTimeout: 3 * time.Second,
 		MaxPending:       5,
-		Transport:        &kolotransport.Config{MaxConns: 50, IdleTimeout: 7 * time.Second, AcceptFunc: func(netip.AddrPort) bool { return true }},
+		Transport:        &kolotransport.Config{MaxConns: 50, IdleTimeout: 7 * time.Second, Datagrams: true, AcceptFunc: func(netip.AddrPort) bool { return true }},
 	}
 	c, err := (&Config{Peer: user, ControlTimeout: 2 * time.Second}).withDefaults()
 	if err != nil {
@@ -237,7 +238,7 @@ func TestConfigInner(t *testing.T) {
 		if sc.Transport != nil || sc.HandshakeTimeout != 3*time.Second || sc.MaxPending != 5 {
 			t.Fatalf("secure config %+v", sc)
 		}
-		if tc.MaxConns != 1 || tc.MaxConnsPerIP != 1 || tc.MaxDialed != 1 || tc.IdleTimeout != 7*time.Second || tc.HandshakeTimeout != 10*time.Second {
+		if tc.MaxConns != 1 || tc.MaxConnsPerIP != 1 || tc.MaxDialed != 1 || tc.IdleTimeout != 7*time.Second || tc.HandshakeTimeout != 10*time.Second || tc.Datagrams {
 			t.Fatalf("transport config %+v", tc)
 		}
 		ap := netip.MustParseAddrPort("127.0.0.1:1")
@@ -245,7 +246,7 @@ func TestConfigInner(t *testing.T) {
 			t.Fatalf("accept %v: AcceptFunc allows %v", accept, got)
 		}
 	}
-	if user.Transport.MaxConns != 50 || user.Transport.AcceptFunc == nil {
+	if user.Transport.MaxConns != 50 || user.Transport.AcceptFunc == nil || !user.Transport.Datagrams {
 		t.Fatal("inner changed the caller's config")
 	}
 	if w := c.innerWait(); w != 2*time.Second+10*time.Second+3*time.Second {

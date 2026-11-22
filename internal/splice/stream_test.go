@@ -34,6 +34,7 @@ type half struct {
 	rdl     time.Time
 	wdl     time.Time
 	writes  int
+	largest int
 }
 
 func (h *half) notify() {
@@ -100,6 +101,7 @@ func (s *memStream) Write(p []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.writes++
+	h.largest = max(h.largest, len(p))
 	total := 0
 	for len(p) > 0 {
 		switch {
@@ -130,6 +132,13 @@ func (s *memStream) writesIn() int {
 	s.in.mu.Lock()
 	defer s.in.mu.Unlock()
 	return s.in.writes
+}
+
+// largestWriteIn returns the size of the largest Write that fed the data s reads.
+func (s *memStream) largestWriteIn() int {
+	s.in.mu.Lock()
+	defer s.in.mu.Unlock()
+	return s.in.largest
 }
 
 func (s *memStream) Close() error {

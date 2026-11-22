@@ -1,4 +1,5 @@
-// Package splice copies the bytes of a relay session between two streams, within its limits.
+// Package splice forwards a relay session between two clients, within its limits: as bytes between two streams, or
+// packet by packet when a client also sends datagrams.
 package splice
 
 import (
@@ -59,6 +60,14 @@ type session struct {
 // Run copies between a and b until both send sides end (Done) or a limit ends the session, which cancels both streams with the returned code.
 // ra and rb, if not nil, pace the bytes read from a and from b.
 func Run(ctx context.Context, a, b Stream, ra, rb *rate.Limiter, lim Limits) uint64 {
+	return run(ctx, a, b, lim, func(s *session, wctx context.Context, wg *sync.WaitGroup) {
+		wg.Go(func() { s.copy(wctx, b, a, ra) })
+		wg.Go(func() { s.copy(wctx, a, b, rb) })
+	})
+}
+
+// run runs a session whose workers start adds to wg, and ends it at MaxDuration or when ctx is done.
+func run(ctx context.Context, a, b Stream, lim Limits, start func(s *session, wctx context.Context, wg *sync.WaitGroup)) uint64 {
 	// WaitN fails at once if a wait would pass its context's deadline, so the buckets wait on wctx, which has none; end cancels it.
 	wctx, stopWait := context.WithCancel(ctx)
 	defer stopWait()
@@ -75,8 +84,7 @@ func Run(ctx context.Context, a, b Stream, ra, rb *rate.Limiter, lim Limits) uin
 	})
 	defer stop()
 	var wg sync.WaitGroup
-	wg.Go(func() { s.copy(wctx, b, a, ra) })
-	wg.Go(func() { s.copy(wctx, a, b, rb) })
+	start(s, wctx, &wg)
 	wg.Wait()
 	s.once.Do(func() {})
 	return s.code

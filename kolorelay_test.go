@@ -441,7 +441,7 @@ func TestConnectTimeout(t *testing.T) {
 	checkGoroutines(t)
 	r := startRelay(t, &ServerConfig{ConnectTimeout: time.Second})
 	target, key := rawClientID(t, r)
-	if code := rawStatus(t, rawSend(t, target, wire.EncodeReserve())); code != wire.StatusOK {
+	if code := rawStatus(t, rawSend(t, target, wire.EncodeReserve(wire.Version0))); code != wire.StatusOK {
 		t.Fatalf("Reserve status %d", code)
 	}
 	begin := time.Now()
@@ -464,16 +464,16 @@ func TestProtocolViolations(t *testing.T) {
 			rawSend(t, c, wire.EncodeStatus(wire.StatusOK))
 		},
 		"second stream": func(c *kolosecure.Conn) {
-			rawStatus(t, rawSend(t, c, wire.EncodeReserve()))
-			rawSend(t, c, wire.EncodeReserve())
+			rawStatus(t, rawSend(t, c, wire.EncodeReserve(wire.Version0)))
+			rawSend(t, c, wire.EncodeReserve(wire.Version0))
 		},
 		"bytes after Reserve": func(c *kolosecure.Conn) {
-			st := rawSend(t, c, wire.EncodeReserve())
+			st := rawSend(t, c, wire.EncodeReserve(wire.Version0))
 			rawStatus(t, st)
 			st.Write([]byte{0})
 		},
 		"uni stream": func(c *kolosecure.Conn) {
-			rawStatus(t, rawSend(t, c, wire.EncodeReserve()))
+			rawStatus(t, rawSend(t, c, wire.EncodeReserve(wire.Version0)))
 			rawUni(t, c)
 		},
 		"uni stream first": func(c *kolosecure.Conn) { rawUni(t, c) },
@@ -574,7 +574,7 @@ func TestSilentInitiatorFreesItsSlot(t *testing.T) {
 	fast := &kolosecure.Config{HandshakeTimeout: time.Second, Transport: &kolotransport.Config{HandshakeTimeout: time.Second}}
 	res := reserve(t, r, tid, &Config{MaxPending: 1, ControlTimeout: time.Second, Peer: fast})
 	raw := rawClient(t, r)
-	if code := rawStatus(t, rawSend(t, raw, wire.EncodeConnect(tid.PublicKey()))); code != wire.StatusOK {
+	if code := rawStatus(t, rawSend(t, raw, wire.EncodeConnect(wire.Version0, tid.PublicKey()))); code != wire.StatusOK {
 		t.Fatalf("Connect status %d", code)
 	}
 	deadline := time.Now().Add(15 * time.Second)
@@ -614,11 +614,13 @@ func relayFor(t *testing.T, cfg ServerConfig) *testRelay {
 
 func TestCloseCodeDuringTransfer(t *testing.T) {
 	checkGoroutines(t)
-	// A slow relay and a small queue keep the dialer's queue full, so the close must replace a queued packet.
+	// A slow relay and a small queue keep the dialer's queue full, so the close must replace a queued packet; a
+	// version 0 dialer puts every packet in that queue.
 	r := relayFor(t, ServerConfig{RateBytes: 512 << 10, RateBurst: 16 << 10})
 	tid, iid := newID(t), newID(t)
-	res := reserve(t, r, tid, nil)
-	ic := dial(t, r, iid, tid.PublicKey(), &Config{SendQueue: 8})
+	res := reserve(t, r, tid, datagramClient())
+	cfg := &Config{SendQueue: 8}
+	ic := dial(t, r, iid, tid.PublicKey(), cfg)
 	tc := accept(t, res)
 	serveEcho(tc)
 	s, err := ic.OpenStream(testCtx(t))
@@ -644,7 +646,7 @@ func TestRefusedClientIsStopped(t *testing.T) {
 	checkGoroutines(t)
 	r := startRelay(t, &ServerConfig{ControlTimeout: time.Minute})
 	c := rawClient(t, r)
-	st := rawSend(t, c, wire.EncodeConnect(newID(t).PublicKey()))
+	st := rawSend(t, c, wire.EncodeConnect(wire.Version0, newID(t).PublicKey()))
 	if code := rawStatus(t, st); code != wire.StatusUnavailable {
 		t.Fatalf("status %d, want Unavailable", code)
 	}
@@ -740,7 +742,7 @@ func TestServerCloseSessionCode(t *testing.T) {
 		}
 	}()
 	raw := rawClient(t, r)
-	st := rawSend(t, raw, wire.EncodeConnect(tid.PublicKey()))
+	st := rawSend(t, raw, wire.EncodeConnect(wire.Version0, tid.PublicKey()))
 	if code := rawStatus(t, st); code != wire.StatusOK {
 		t.Fatalf("Connect status %d", code)
 	}
@@ -808,7 +810,7 @@ func TestAllowConnectProtectsSessions(t *testing.T) {
 					target = newID(t).PublicKey()
 				}
 				raw := rawClient(t, r)
-				if code := rawStatus(t, rawSend(t, raw, wire.EncodeConnect(target))); code != wire.StatusUnavailable {
+				if code := rawStatus(t, rawSend(t, raw, wire.EncodeConnect(wire.Version0, target))); code != wire.StatusUnavailable {
 					t.Fatalf("refused client got status %d, want Unavailable", code)
 				}
 			}
@@ -822,11 +824,11 @@ func TestServerCloseDuringAnnounce(t *testing.T) {
 	checkGoroutines(t)
 	r := relayFor(t, ServerConfig{ConnectTimeout: 30 * time.Second})
 	target, key := rawClientID(t, r)
-	if code := rawStatus(t, rawSend(t, target, wire.EncodeReserve())); code != wire.StatusOK {
+	if code := rawStatus(t, rawSend(t, target, wire.EncodeReserve(wire.Version0))); code != wire.StatusOK {
 		t.Fatalf("Reserve status %d", code)
 	}
 	initiator := rawClient(t, r)
-	st := rawSend(t, initiator, wire.EncodeConnect(key))
+	st := rawSend(t, initiator, wire.EncodeConnect(wire.Version0, key))
 	// The relay has announced the session once the target sees its stream, and the target never answers.
 	if _, err := target.AcceptStream(testCtx(t)); err != nil {
 		t.Fatal(err)
@@ -914,7 +916,7 @@ func TestAllowConnectNoOracle(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { c.Close() })
-			sts = append(sts, rawSend(t, c, wire.EncodeConnect(to)))
+			sts = append(sts, rawSend(t, c, wire.EncodeConnect(wire.Version0, to)))
 			<-entered
 		}
 		dial(t, r, a, tid.PublicKey(), nil)
@@ -934,7 +936,7 @@ func rawConnect(t *testing.T, r *testRelay, id *koloid.Identity, target ed25519.
 		t.Fatal(err)
 	}
 	defer c.Close()
-	return rawStatus(t, rawSend(t, c, wire.EncodeConnect(target)))
+	return rawStatus(t, rawSend(t, c, wire.EncodeConnect(wire.Version0, target)))
 }
 
 func TestDeniedKeyLearnsFullRelay(t *testing.T) {
@@ -982,7 +984,7 @@ func TestSlowAllowConnectHoldsNoSlot(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { c.Close() })
-			rawSend(t, c, wire.EncodeConnect(tid.PublicKey()))
+			rawSend(t, c, wire.EncodeConnect(wire.Version0, tid.PublicKey()))
 			<-called
 			dial(t, r, good, tid.PublicKey(), nil)
 			accept(t, res)
@@ -1006,7 +1008,7 @@ func TestCloseCodePaths(t *testing.T) {
 			untilClosing(r.s)
 		})
 		raw := rawClient(t, r)
-		st := rawSend(t, raw, wire.EncodeConnect(tid.PublicKey()))
+		st := rawSend(t, raw, wire.EncodeConnect(wire.Version0, tid.PublicKey()))
 		<-arrived
 		closed := make(chan struct{})
 		go func() {
@@ -1023,7 +1025,7 @@ func TestCloseCodePaths(t *testing.T) {
 		checkGoroutines(t)
 		r := relayFor(t, ServerConfig{})
 		target, key := rawClientID(t, r)
-		if code := rawStatus(t, rawSend(t, target, wire.EncodeReserve())); code != wire.StatusOK {
+		if code := rawStatus(t, rawSend(t, target, wire.EncodeReserve(wire.Version0))); code != wire.StatusOK {
 			t.Fatalf("Reserve status %d", code)
 		}
 		incoming := make(chan *kolotransport.Stream, 1)
@@ -1054,7 +1056,7 @@ func TestCloseCodePaths(t *testing.T) {
 		r.s.hook.Store(&hook)
 		t.Cleanup(func() { r.s.hook.Store(nil) })
 		raw := rawClient(t, r)
-		st := rawSend(t, raw, wire.EncodeConnect(key))
+		st := rawSend(t, raw, wire.EncodeConnect(wire.Version0, key))
 		<-arrived
 		ts := <-incoming
 		go r.s.Close()
@@ -1074,7 +1076,7 @@ func TestCloseCodePaths(t *testing.T) {
 			<-r.s.sessCtx.Done()
 		})
 		raw := rawClient(t, r)
-		st := rawSend(t, raw, wire.EncodeReserve())
+		st := rawSend(t, raw, wire.EncodeReserve(wire.Version0))
 		<-arrived
 		go r.s.Close()
 		relayClosed(t, "a Reserve being set up", closeCodeOf(t, st))
@@ -1088,7 +1090,7 @@ func TestCloseCodePaths(t *testing.T) {
 			<-r.s.sessCtx.Done()
 		})
 		raw := rawClient(t, r)
-		st := rawSend(t, raw, wire.EncodeConnect(newID(t).PublicKey()))
+		st := rawSend(t, raw, wire.EncodeConnect(wire.Version0, newID(t).PublicKey()))
 		<-arrived
 		go r.s.Close()
 		relayClosed(t, "a refusal", closeCodeOf(t, st))
@@ -1136,7 +1138,7 @@ func TestBucketChurn(t *testing.T) {
 	const rateBytes, burst, each, sessions = 64 << 10, 64 << 10, 16 << 10, 20
 	r := relayFor(t, ServerConfig{RateBytes: rateBytes, RateBurst: burst})
 	target, key := rawClientID(t, r)
-	if code := rawStatus(t, rawSend(t, target, wire.EncodeReserve())); code != wire.StatusOK {
+	if code := rawStatus(t, rawSend(t, target, wire.EncodeReserve(wire.Version0))); code != wire.StatusOK {
 		t.Fatalf("Reserve status %d", code)
 	}
 	got := make(chan int64, 1)
@@ -1160,7 +1162,7 @@ func TestBucketChurn(t *testing.T) {
 	var total int64
 	for range sessions {
 		raw := rawClient(t, r)
-		st := rawSend(t, raw, wire.EncodeConnect(key))
+		st := rawSend(t, raw, wire.EncodeConnect(wire.Version0, key))
 		if code := rawStatus(t, st); code != wire.StatusOK {
 			t.Fatalf("Connect status %d", code)
 		}
@@ -1236,7 +1238,7 @@ func (endedStream) SetWriteDeadline(time.Time) error { return nil }
 
 func TestEndWithGrace(t *testing.T) {
 	checkGoroutines(t)
-	pc := pconn.New(endedStream{}, &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 1}, &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 2}, 8)
+	pc := pconn.New(endedStream{}, &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 1}, &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 2}, 8, nil)
 	defer pc.Close()
 	<-pc.Done()
 	ctx, cancel := endWith(context.Background(), pc)
@@ -1360,7 +1362,7 @@ func TestDialOutlastsConnectTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rc.Close() })
-	if code := rawStatus(t, rawSend(t, rc, wire.EncodeReserve())); code != wire.StatusOK {
+	if code := rawStatus(t, rawSend(t, rc, wire.EncodeReserve(wire.Version0))); code != wire.StatusOK {
 		t.Fatalf("Reserve status %d", code)
 	}
 	relay, local, err := relayAddrs(rc)
@@ -1390,7 +1392,7 @@ func TestDialOutlastsConnectTimeout(t *testing.T) {
 			got <- nil
 			return
 		}
-		got <- res.handshake(ts, m.Key)
+		got <- res.handshake(pconn.New(ts, cloneUDP(local), cloneUDP(relay), cfg.SendQueue, nil), m.Key)
 	}()
 	dctx, dcancel := context.WithTimeout(context.Background(), time.Minute)
 	defer dcancel()
@@ -1449,12 +1451,12 @@ func TestAKeyOfTheWrongLengthEndsTheConnection(t *testing.T) {
 	})
 	t.Run("connect", func(t *testing.T) {
 		client, server := securePair(t)
-		rawSend(t, client, wire.EncodeConnect(make([]byte, 32)))
+		rawSend(t, client, wire.EncodeConnect(wire.Version0, make([]byte, 32)))
 		sst, err := server.AcceptStream(testCtx(t))
 		if err != nil {
 			t.Fatal(err)
 		}
-		go r.s.connect(server, sst, limits.Key{1}, make([]byte, 31))
+		go r.s.connect(&caller{conn: server, st: sst, key: limits.Key{1}}, make([]byte, 31))
 		wantClosed(t, client)
 	})
 }

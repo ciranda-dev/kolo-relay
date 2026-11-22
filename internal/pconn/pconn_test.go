@@ -22,7 +22,7 @@ var (
 func connPair(t *testing.T, buffer, queue int) (*Conn, *Conn, *memStream, *memStream) {
 	t.Helper()
 	a, b := streamPair(buffer)
-	ca, cb := New(a, localA, relay, queue), New(b, localB, relay, queue)
+	ca, cb := New(a, localA, relay, queue, nil), New(b, localB, relay, queue, nil)
 	t.Cleanup(func() {
 		ca.Close()
 		cb.Close()
@@ -278,7 +278,7 @@ func TestCloseFlushIsBounded(t *testing.T) {
 	checkGoroutines(t)
 	// Nobody reads b, and its 500-byte buffer cannot take even the final 1002-byte frame, so the flush fails.
 	a, b := streamPair(500)
-	ca := New(a, localA, relay, 16)
+	ca := New(a, localA, relay, 16, nil)
 	t.Cleanup(func() { ca.Close() })
 	for i := range 16 {
 		ca.WriteTo(seq(i, 1000), relay)

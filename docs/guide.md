@@ -86,7 +86,9 @@ relay sent except numeric codes:
 - `ErrLimit`: `MaxReservations`, `MaxSessions` or `MaxSessionsPerPeer`
   was reached; trying later may work.
 - `ErrReservationEnded`, `ErrClosed` (the reservation was closed).
-- `ErrProtocol`, `ErrUnsupportedVersion`.
+- `ErrProtocol`.
+- `ErrUnsupportedVersion`: the relay refused both versions. A version 1 request it
+  refuses is sent once more in version 0, on a new connection.
 - `ErrInvalidConfig`, `ErrInvalidArgument`.
 - A relay that does not answer within `ControlTimeout` gives an error
   wrapping `os.ErrDeadlineExceeded`.

@@ -8,9 +8,12 @@ import (
 )
 
 func FuzzDecode(f *testing.F) {
-	f.Add(EncodeReserve())
-	f.Add(EncodeConnect(key(1)))
-	f.Add(EncodeIncoming(key(2)))
+	f.Add(EncodeReserve(Version0))
+	f.Add(EncodeConnect(Version0, key(1)))
+	f.Add(EncodeIncoming(Version0, key(2)))
+	f.Add(EncodeReserve(Version1))
+	f.Add(EncodeConnect(Version1, key(1)))
+	f.Add(EncodeIncoming(Version1, key(2)))
 	f.Add(EncodeStatus(StatusLimit))
 	f.Add([]byte{1, 1})
 	f.Fuzz(func(t *testing.T, body []byte) {
@@ -21,14 +24,17 @@ func FuzzDecode(f *testing.F) {
 			}
 			return
 		}
+		if m.Version != Version0 && m.Version != Version1 {
+			t.Fatalf("decoded version %d", m.Version)
+		}
 		var again []byte
 		switch m.Type {
 		case TypeReserve:
-			again = EncodeReserve()
+			again = EncodeReserve(m.Version)
 		case TypeConnect:
-			again = EncodeConnect(m.Key)
+			again = EncodeConnect(m.Version, m.Key)
 		case TypeIncoming:
-			again = EncodeIncoming(m.Key)
+			again = EncodeIncoming(m.Version, m.Key)
 		case TypeStatus:
 			again = EncodeStatus(m.Code)
 		}
@@ -84,6 +90,30 @@ func FuzzReadPacket(f *testing.F) {
 			if n > size || n > MaxPacketSize {
 				t.Fatalf("read %d bytes into %d", n, size)
 			}
+		}
+	})
+}
+
+func FuzzDecodeDatagram(f *testing.F) {
+	d, _ := AppendDatagram(nil, 1, []byte("hello"))
+	f.Add(d)
+	d, _ = AppendDatagram(nil, MaxQuarterStreamID, make([]byte, MaxPacketSize))
+	f.Add(d)
+	f.Add([]byte{0x80})
+	f.Fuzz(func(t *testing.T, in []byte) {
+		id, p, err := DecodeDatagram(in)
+		if err != nil {
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("unexpected error %v", err)
+			}
+			return
+		}
+		if len(p) == 0 || len(p) > MaxPacketSize || id > MaxQuarterStreamID {
+			t.Fatalf("ID %d with %d bytes from %x", id, len(p), in)
+		}
+		again, err := AppendDatagram(nil, id, p)
+		if err != nil || !bytes.Equal(again, in) {
+			t.Fatalf("decoded %x, re-encoded %x (%v)", in, again, err)
 		}
 	})
 }

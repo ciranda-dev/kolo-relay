@@ -10,9 +10,9 @@ An optional relay for Kolo peers that cannot connect directly, chosen by the app
 
 kolo-relay forwards traffic for peers that cannot connect directly, with allocations, lifetimes and quotas modeled on [TURN (RFC 8656)](https://www.rfc-editor.org/info/rfc8656), used only when the application chooses it, like the `relay` policy of [WebRTC](https://www.w3.org/TR/webrtc/#dom-rtcicetransportpolicy).
 
-Some peers cannot reach each other: both behind symmetric NAT or CGNAT, or behind a firewall that only lets traffic out. A relay with a reachable address lets them connect anyway. A peer reserves a slot on the relay; another peer asks the relay for that peer's key; the relay joins the two and copies bytes between them.
+Some peers cannot reach each other: both behind symmetric NAT or CGNAT, or behind a firewall that only lets traffic out. A relay with a reachable address lets them connect anyway. A peer reserves a slot on the relay; another peer asks the relay for that peer's key; the relay joins the two and forwards their packets.
 
-The two peers run an ordinary [kolo-secure](https://github.com/ciranda-dev/kolo-secure) connection end to end. Its QUIC packets travel inside a stream of each peer's own kolo-secure connection to the relay, so the relay forwards ciphertext of a TLS session it is not part of and cannot pose as either peer. It can see who talks to whom, when, and how much. The relay is never used on its own: the application passes the relay's address and key to every call, and nothing tries a direct path or falls back to a relay.
+The two peers run an ordinary [kolo-secure](https://github.com/ciranda-dev/kolo-secure) connection end to end. Its QUIC packets travel inside each peer's own kolo-secure connection to the relay: as frames on one stream, or as QUIC datagrams ([RFC 9221](https://www.rfc-editor.org/info/rfc9221)) when both ends of that connection offer them and a packet fits. The relay offers datagrams; a client uses them when its application sets `Transport.Datagrams` in `Config.Relay`. A datagram is not resent, so a packet lost on the way to the relay is a loss for the end-to-end connection, which recovers from it as on a direct path, instead of a delay for every packet behind it. On the simulated path in [Limits](docs/limits.md) the datagram path gained no goodput under loss and 1.6 times without loss at the relay's default window, so clients opt in. The relay forwards ciphertext of a TLS session it is not part of and cannot pose as either peer. It can see who talks to whom, when, and how much. The relay is never used on its own: the application passes the relay's address and key to every call, and nothing tries a direct path or falls back to a relay.
 
 It is Go only and builds without cgo. It is IPv4 only: IPv6 input is refused with `ErrInvalidArgument`.
 
@@ -132,7 +132,7 @@ Errors are sentinels for `errors.Is`: `ErrUnavailable`, `ErrNotAllowed`, `ErrLim
 The defaults are for trying it out, not for the open internet. Two things to settle first; the numbers are in [Limits](docs/limits.md).
 
 - **Who may use it.** With `AllowReserve` nil, any key may reserve and keys cost nothing. `Listen` logs a warning when it is nil (to `ServerConfig.Logger`, or `slog.Default()`). Four addresses, each at the default `MaxConnsPerIP` of 4, can take all 16 session slots and hold them for `MaxSessionDuration` (1 hour) with keep-alive traffic, and 16 addresses can fill all 64 reservations. A relay for your own nodes sets `AllowReserve` to the keys it serves and, if needed, `AllowConnect` to the pairs it joins; a relay that is open on purpose sets `MaxSessions`, `RateBytes` and `MaxSessionDuration` to what you can pay for, since it pays for every byte it forwards.
-- **How much memory it needs.** At the defaults (`MaxConns` 128, receive window 256 KiB) the worst-case live heap is 7.3 GiB, reached only by a client with its own QUIC stack that leaves gaps at the start of its streams; the measured attack reached 1.1 GiB. Run it on a host with about 8 GiB and `GOMEMLIMIT=8500MiB`, or lower the limits. For a small host (about 250 MiB of live heap, `GOMEMLIMIT=300MiB`):
+- **How much memory it needs.** At the defaults (`MaxConns` 128, receive window 256 KiB) the worst-case live heap is 7.4 GiB, reached only by a client with its own QUIC stack that leaves gaps at the start of its streams; the measured attack reached 1.1 GiB. Run it on a host with about 8 GiB and `GOMEMLIMIT=8500MiB`, or lower the limits. For a small host (about 252 MiB of live heap, `GOMEMLIMIT=300MiB`):
 
 ```go
 cfg := &kolorelay.ServerConfig{
@@ -141,6 +141,7 @@ cfg := &kolorelay.ServerConfig{
 	Secure: &kolosecure.Config{Transport: &kolotransport.Config{
 		MaxConns: 5, MaxConnsPerIP: 4, MaxDialed: 1, MaxIncomingStreams: 2,
 		MaxStreamReceiveWindow: 64 << 10, MaxConnReceiveWindow: 64 << 10,
+		Datagrams: true,
 	}},
 }
 ```
@@ -153,7 +154,7 @@ cfg := &kolorelay.ServerConfig{
 
 ## Status
 
-Experimental. The API may change before v1.0.0.
+Experimental. The API may change before v1.0.0. The wire protocol is version 1, which adds the datagram path; version 0 clients and relays still connect, with packets on the stream only, and default clients speak version 0. Throughput was measured only on loopback.
 
 ## License
 
