@@ -111,7 +111,7 @@ func TestServerConfigSessionsFollowConns(t *testing.T) {
 }
 
 func TestServerConfigPerPeerDefaultsFollowMaxSessions(t *testing.T) {
-	for _, c := range []struct{ sessions, peer, target int }{{1, 1, 1}, {2, 2, 2}, {6, 4, 6}, {16, 4, 8}, {10000, 4, 8}} {
+	for _, c := range []struct{ sessions, peer, target int }{{1, 1, 1}, {2, 2, 2}, {6, 4, 6}, {16, 4, 8}, {128, 4, 8}} {
 		got, err := (&ServerConfig{MaxSessions: c.sessions}).withDefaults()
 		if err != nil {
 			t.Fatal(err)
@@ -128,7 +128,7 @@ func TestServerConfigRanges(t *testing.T) {
 		cfg  ServerConfig
 	}{
 		{"MaxReservations", ServerConfig{MaxReservations: -1}},
-		{"MaxSessions", ServerConfig{MaxSessions: 10001}},
+		{"MaxSessions", ServerConfig{MaxSessions: 129}},
 		{"MaxSessionsPerPeer", ServerConfig{MaxSessions: 4, MaxSessionsPerPeer: 5}},
 		{"MaxSessionsPerTarget", ServerConfig{MaxSessions: 4, MaxSessionsPerTarget: 5}},
 		{"MaxSessionsPerPeer", ServerConfig{MaxSessionsPerPeer: -1}},
@@ -137,7 +137,6 @@ func TestServerConfigRanges(t *testing.T) {
 		{"MaxSessionDuration", ServerConfig{MaxSessionDuration: 999 * time.Millisecond}},
 		{"MaxSessionDuration", ServerConfig{MaxSessionDuration: 25 * time.Hour}},
 		{"MaxSessionBytes", ServerConfig{MaxSessionBytes: 64<<10 - 1}},
-		{"MaxSessionBytes", ServerConfig{MaxSessionBytes: 1<<40 + 1}},
 		{"SessionIdleTimeout", ServerConfig{SessionIdleTimeout: 11 * time.Minute}},
 		{"ConnectTimeout", ServerConfig{ConnectTimeout: 61 * time.Second}},
 		{"ControlTimeout", ServerConfig{ControlTimeout: -time.Second}},
@@ -166,8 +165,8 @@ func TestServerConfigBounds(t *testing.T) {
 		RateBytes: 16 << 10, RateBurst: 16 << 10, FlushInterval: 100 * time.Microsecond,
 	}
 	high := ServerConfig{
-		MaxReservations: 1000000, MaxSessions: 10000, MaxSessionsPerPeer: 10000, MaxSessionsPerTarget: 10000,
-		ReservationLifetime: 24 * time.Hour, MaxSessionDuration: 24 * time.Hour, MaxSessionBytes: 1 << 40,
+		MaxReservations: 1000000, MaxSessions: 128, MaxSessionsPerPeer: 128, MaxSessionsPerTarget: 128,
+		ReservationLifetime: 24 * time.Hour, MaxSessionDuration: 24 * time.Hour, MaxSessionBytes: math.MaxInt64,
 		SessionIdleTimeout: 10 * time.Minute, ConnectTimeout: time.Minute, ControlTimeout: time.Minute,
 		RateBytes: 1 << 30, RateBurst: 64 << 20, FlushInterval: 100 * time.Millisecond,
 	}
@@ -180,6 +179,31 @@ func TestServerConfigBounds(t *testing.T) {
 		if !reflect.DeepEqual(got, cfg) {
 			t.Fatalf("changed a valid config:\n got %+v\nwant %+v", got, cfg)
 		}
+	}
+}
+
+func TestServerConfigMaxSessionsFollowsMaxConns(t *testing.T) {
+	big := &kolosecure.Config{Transport: &kolotransport.Config{MaxConns: 20000}}
+	for _, c := range []struct {
+		secure   *kolosecure.Config
+		sessions int
+		ok       bool
+	}{{nil, 128, true}, {nil, 129, false}, {big, 10001, true}, {big, 20000, true}, {big, 20001, false}} {
+		_, err := (&ServerConfig{Secure: c.secure, MaxSessions: c.sessions}).withDefaults()
+		if c.ok != (err == nil) || err != nil && !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("MaxSessions %d: %v", c.sessions, err)
+		}
+	}
+}
+
+func TestServerConfigMaxSessionBytesHasNoMaximum(t *testing.T) {
+	for _, n := range []int64{1<<40 + 1, math.MaxInt64} {
+		if got, err := (&ServerConfig{MaxSessionBytes: n}).withDefaults(); err != nil || got.MaxSessionBytes != n {
+			t.Errorf("MaxSessionBytes %d: %v", n, err)
+		}
+	}
+	if _, err := (&ServerConfig{MaxSessionBytes: 64<<10 - 1}).withDefaults(); err == nil || err.Error() != "kolorelay: invalid config: MaxSessionBytes must be at least 64 KiB" {
+		t.Fatalf("below 64 KiB: %v", err)
 	}
 }
 

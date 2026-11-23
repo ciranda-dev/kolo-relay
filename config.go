@@ -20,7 +20,7 @@ type ServerConfig struct {
 	// MaxReservations caps the reserved keys. Default (listener MaxConns - MaxSessions) / 2, at least 1: a reservation holds up to two connections
 	// for a while after each lifetime end. There is no maximum.
 	MaxReservations int
-	// MaxSessions caps the sessions being set up or open. Default 16, or a quarter of the listener MaxConns if lower (at least 1), from 1 to 10000.
+	// MaxSessions caps the sessions being set up or open. Default 16, or a quarter of the listener MaxConns if lower (at least 1), from 1 to the listener MaxConns.
 	MaxSessions int
 	// MaxSessionsPerPeer caps the sessions one key has started. Default 4 or MaxSessions if lower, at most MaxSessions.
 	MaxSessionsPerPeer int
@@ -31,7 +31,7 @@ type ServerConfig struct {
 	ReservationLifetime time.Duration
 	// MaxSessionDuration ends a session. Default 1h, from 1s to 24h.
 	MaxSessionDuration time.Duration
-	// MaxSessionBytes ends a session once this many bytes went one way. Default 1 GiB, from 64 KiB to 1 TiB.
+	// MaxSessionBytes ends a session once this many bytes went one way. Default 1 GiB, at least 64 KiB.
 	MaxSessionBytes int64
 	// SessionIdleTimeout ends a session with no byte either way. Default 60s, from 1s to 10m.
 	// Keep-alive is always on, so it ends a session between live peers only if it is not above their KeepAlivePeriod (5s by default).
@@ -96,7 +96,8 @@ func (c *ServerConfig) withDefaults() (ServerConfig, error) {
 	if c != nil {
 		out = *c
 	}
-	if err := (limit[int]{"MaxSessions", max(1, min(16, listenerMaxConns(out.Secure)/4)), 1, 10000}).apply(&out.MaxSessions); err != nil {
+	conns := listenerMaxConns(out.Secure)
+	if err := (limit[int]{"MaxSessions (at most the listener MaxConns)", max(1, min(16, conns/4)), 1, conns}).apply(&out.MaxSessions); err != nil {
 		return ServerConfig{}, err
 	}
 	errs := []error{
@@ -104,7 +105,6 @@ func (c *ServerConfig) withDefaults() (ServerConfig, error) {
 		limit[int]{"MaxSessionsPerTarget", min(8, out.MaxSessions), 1, out.MaxSessions}.apply(&out.MaxSessionsPerTarget),
 		limit[time.Duration]{"ReservationLifetime", time.Hour, time.Second, 24 * time.Hour}.apply(&out.ReservationLifetime),
 		limit[time.Duration]{"MaxSessionDuration", time.Hour, time.Second, 24 * time.Hour}.apply(&out.MaxSessionDuration),
-		limit[int64]{"MaxSessionBytes", 1 << 30, 64 << 10, 1 << 40}.apply(&out.MaxSessionBytes),
 		limit[time.Duration]{"SessionIdleTimeout", time.Minute, time.Second, 10 * time.Minute}.apply(&out.SessionIdleTimeout),
 		limit[time.Duration]{"ConnectTimeout", defaultConnectTimeout, time.Second, time.Minute}.apply(&out.ConnectTimeout),
 		limit[time.Duration]{"ControlTimeout", 15 * time.Second, time.Second, time.Minute}.apply(&out.ControlTimeout),
@@ -118,6 +118,12 @@ func (c *ServerConfig) withDefaults() (ServerConfig, error) {
 			return ServerConfig{}, err
 		}
 	}
+	switch {
+	case out.MaxSessionBytes == 0:
+		out.MaxSessionBytes = 1 << 30
+	case out.MaxSessionBytes < 64<<10:
+		return ServerConfig{}, fmt.Errorf("%w: MaxSessionBytes must be at least 64 KiB", ErrInvalidConfig)
+	}
 	if err := checkNetwork("Secure", out.Secure); err != nil {
 		return ServerConfig{}, err
 	}
@@ -128,7 +134,7 @@ func (c *ServerConfig) withDefaults() (ServerConfig, error) {
 	case out.MaxReservations < 0:
 		return ServerConfig{}, fmt.Errorf("%w: MaxReservations must not be negative", ErrInvalidConfig)
 	case out.MaxReservations == 0:
-		out.MaxReservations = max(1, (listenerMaxConns(out.Secure)-out.MaxSessions)/2)
+		out.MaxReservations = max(1, (conns-out.MaxSessions)/2)
 	}
 	return out, nil
 }
@@ -141,7 +147,7 @@ func listenerMaxConns(s *kolosecure.Config) int {
 	if t := s.Transport; t != nil && t.MaxConns > 0 {
 		return t.MaxConns
 	}
-	return defaultMaxConns
+	return kolotransport.DefaultMaxConns
 }
 
 // relaySecure is the relay's listener when ServerConfig.Secure is nil.
@@ -238,9 +244,6 @@ func (c Config) innerWait() time.Duration {
 }
 
 const defaultConnectTimeout = 15 * time.Second
-
-// defaultMaxConns is kolo-transport's default MaxConns, set here so MaxReservations knows it.
-const defaultMaxConns = 100
 
 // defaultHandshake is kolo-transport's and kolo-secure's default, set here so innerWait knows it.
 const defaultHandshake = 10 * time.Second
