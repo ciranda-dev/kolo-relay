@@ -12,8 +12,8 @@ The defaults suit a trial on a host with about 8 GiB (the worst-case heap below 
 | Option | Default | Range | Why |
 |---|---|---|---|
 | `Secure` (the relay's kolo-secure listener) | nil: the listener rows below | any `*kolosecure.Config`, used as given | Protocol: a non-nil one sets every listener field. |
-| `MaxReservations` | 0: (listener `MaxConns` - `MaxSessions`) / 2, at least 1; 56 at the defaults | 1 and up, no maximum | Security: it bounds the table a flood of free keys fills. A reservation lives on its client's connection, so the table cannot outgrow `MaxConns`, whose memory is measured below; the default is the sizing rule of "Sizing a relay for a swarm" solved for reservations. A positive value is an operator cap, and a cap above `MaxConns` has no effect. To raise it, raise `MaxConns` (and the memory it needs) in `Secure`. |
-| `MaxSessions` (being set up or open) | 16 | 1 to 10000 | Memory: it bounds the egress (2 × `MaxSessions` × `RateBytes`) and the send term of the heap. |
+| `MaxReservations` | 0: (listener `MaxConns` - `MaxSessions`) / 2, at least 1; 56 at the defaults, 4 at a `MaxConns` of 10 or 12 | 1 and up, no maximum | Security: it bounds the table a flood of free keys fills. A reservation lives on its client's connection, so the table cannot outgrow `MaxConns`, whose memory is measured below; the default is the sizing rule of "Sizing a relay for a swarm" solved for reservations. A positive value is an operator cap, and a cap above `MaxConns` has no effect. Leave `MaxSessions` unset with a small `MaxConns`: a `MaxSessions` close to `MaxConns` leaves the reservations nothing (a `MaxConns` of 12 with a `MaxSessions` of 10 gives 1). To raise it, raise `MaxConns` (and the memory it needs) in `Secure`. |
+| `MaxSessions` (being set up or open) | 16, or a quarter of the listener `MaxConns` if lower, at least 1 | 1 to 10000 | Memory: it bounds the egress (2 × `MaxSessions` × `RateBytes`) and the send term of the heap. |
 | `MaxSessionsPerPeer` (started by one key) | 4, or `MaxSessions` if lower | 1 to `MaxSessions` | Security: one key cannot take every session. |
 | `MaxSessionsPerTarget` (towards one reserved key) | 8, or `MaxSessions` if lower | 1 to `MaxSessions` | Security: one target cannot be flooded with sessions. |
 | `ReservationLifetime` | 1h | 1s to 24h | Security: a stale reservation ends and `AllowReserve` runs again. |
@@ -32,7 +32,7 @@ The defaults suit a trial on a host with about 8 GiB (the worst-case heap below 
 | control message | 64 bytes | fixed | Protocol: the largest message is 34 bytes. |
 | packet frame or datagram | 1452 bytes | fixed | Protocol: quic-go never sends a larger packet (`MaxPacketBufferSize`, internal/protocol/protocol.go:111). |
 | packet queue per direction of a version 1 session | 32 packets | fixed | Memory: as many as quic-go queues datagrams to send on a connection; a packet from a stream waits while it is full, one from a datagram is dropped. About 48 KiB in Go's 1536-byte size class. |
-| listener `MaxConns` (`Secure` nil) | 128 | 1 to 10000 | Memory: it bounds the connections a flood holds, each up to 47.4 MiB of heap (below). |
+| listener `MaxConns` (`Secure` nil) | 128 | at least 1 | Memory: it bounds the connections a flood holds, each up to 47.4 MiB of heap (below); kolo-transport's `MaxMemory` check bounds it, and the defaults of `MaxSessions` and `MaxReservations` follow it. |
 | listener `MaxConnsPerIP` | 4 | 1 to `MaxConns` | Security: one address cannot take every connection. |
 | listener `MaxDialed` | 1 | kolo-transport's minimum | Protocol: the relay never dials. |
 | listener `MaxIncomingStreams` | 2 | 1 to 1000 | Protocol: the handshake and one control stream; any other stream closes the connection. |

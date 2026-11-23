@@ -75,8 +75,11 @@ func TestServerConfigReservationsFollowConns(t *testing.T) {
 		{"raised MaxConns", ServerConfig{Secure: secure(1000)}, 492},
 		{"raised MaxSessions", ServerConfig{Secure: secure(1000), MaxSessions: 100}, 450},
 		{"kolo-transport default MaxConns", ServerConfig{Secure: &kolosecure.Config{}}, 42},
-		{"MaxConns near MaxSessions", ServerConfig{Secure: secure(20)}, 2},
-		{"MaxConns below MaxSessions", ServerConfig{Secure: secure(10)}, 1},
+		{"MaxConns 20", ServerConfig{Secure: secure(20)}, 7},
+		{"MaxConns 12", ServerConfig{Secure: secure(12)}, 4},
+		{"MaxConns 10", ServerConfig{Secure: secure(10)}, 4},
+		{"MaxConns 1", ServerConfig{Secure: secure(1)}, 1},
+		{"small MaxConns, explicit MaxSessions", ServerConfig{Secure: secure(12), MaxSessions: 10}, 1},
 		{"operator cap below", ServerConfig{Secure: secure(1000), MaxReservations: 7}, 7},
 		{"operator cap above MaxConns", ServerConfig{MaxReservations: 200000}, 200000},
 	}
@@ -87,6 +90,22 @@ func TestServerConfigReservationsFollowConns(t *testing.T) {
 		}
 		if got.MaxReservations != c.want {
 			t.Errorf("%s: MaxReservations %d, want %d", c.name, got.MaxReservations, c.want)
+		}
+	}
+}
+
+func TestServerConfigSessionsFollowConns(t *testing.T) {
+	for _, c := range []struct{ conns, want int }{{0, 16}, {1, 1}, {3, 1}, {10, 2}, {12, 3}, {64, 16}, {1000, 16}} {
+		cfg := &ServerConfig{}
+		if c.conns > 0 {
+			cfg.Secure = &kolosecure.Config{Transport: &kolotransport.Config{MaxConns: c.conns}}
+		}
+		got, err := cfg.withDefaults()
+		if err != nil {
+			t.Fatalf("MaxConns %d: %v", c.conns, err)
+		}
+		if got.MaxSessions != c.want {
+			t.Errorf("MaxConns %d: MaxSessions %d, want %d", c.conns, got.MaxSessions, c.want)
 		}
 	}
 }
