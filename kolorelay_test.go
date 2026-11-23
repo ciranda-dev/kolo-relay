@@ -1479,3 +1479,11 @@ func TestAKeyOfTheWrongLengthEndsTheConnection(t *testing.T) {
 		wantClosed(t, client)
 	})
 }
+
+// A Peer config sized for the application's own listener, as kolo-swarm passes it, still makes relayed sessions.
+func TestPeerMaxPendingAboveOne(t *testing.T) {
+	checkGoroutines(t)
+	r := startRelay(t, nil)
+	ic, _, _ := pair(t, r, &Config{Peer: &kolosecure.Config{MaxPending: 16}})
+	echo(t, ic, []byte("a session with the application's MaxPending"))
+}

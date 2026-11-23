@@ -390,7 +390,7 @@ func TestTargetListenerFailureFreesTheSession(t *testing.T) {
 	r := startRelay(t, nil)
 	for name, peer := range map[string]*kolosecure.Config{
 		"transport": {Transport: &kolotransport.Config{MaxIncomingStreams: 1001}},
-		"secure":    {MaxPending: 1001},
+		"secure":    {HandshakeTimeout: 2 * time.Minute},
 	} {
 		tid := newID(t)
 		res := reserve(t, r, tid, &Config{Relay: datagramClient().Relay, Peer: peer})

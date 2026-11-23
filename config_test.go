@@ -306,7 +306,7 @@ func TestConfigInner(t *testing.T) {
 	}
 	for _, accept := range []bool{true, false} {
 		tc, sc := c.inner(accept)
-		if sc.Transport != nil || sc.HandshakeTimeout != 3*time.Second || sc.MaxPending != 5 {
+		if sc.Transport != nil || sc.HandshakeTimeout != 3*time.Second || sc.MaxPending != 1 {
 			t.Fatalf("secure config %+v", sc)
 		}
 		if tc.MaxConns != 1 || tc.MaxConnsPerIP != 1 || tc.MaxDialed != 1 || tc.IdleTimeout != 7*time.Second || tc.HandshakeTimeout != 10*time.Second || tc.Datagrams {
