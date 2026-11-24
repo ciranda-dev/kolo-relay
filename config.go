@@ -63,7 +63,7 @@ type Config struct {
 	// a non-nil value is used as given. The client sends packets as datagrams when Relay.Transport.Datagrams is set and
 	// the relay offers them.
 	Relay *kolosecure.Config
-	// Peer configures the end-to-end connection. Nil means the defaults; kolorelay sets the listener-only transport fields.
+	// Peer configures the end-to-end connection. Nil means the defaults; kolorelay sets the listener-only transport fields and MaxPending.
 	Peer *kolosecure.Config
 	// ControlTimeout bounds each exchange with the relay and the wait for a relayed peer's handshake.
 	// Default 20s, 5s above the relay's default ConnectTimeout; from 1s to 60s.
@@ -222,7 +222,8 @@ func (c Config) inner(accept bool) (*kolotransport.Config, *kolosecure.Config) {
 	if s.Transport != nil {
 		t = *s.Transport
 	}
-	s.Transport = nil
+	// The inner listener holds one connection, so the MaxPending sized for the application's own listener does not apply.
+	s.Transport, s.MaxPending = nil, 1
 	if s.HandshakeTimeout == 0 {
 		s.HandshakeTimeout = defaultHandshake
 	}

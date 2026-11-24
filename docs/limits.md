@@ -403,7 +403,7 @@ default; out of range is `ErrInvalidConfig`):
 | Option | Default | Range | Why |
 |---|---|---|---|
 | `Relay` (connection to the relay) | nil: kolo-secure defaults with `KeepAlivePeriod` 5s and no datagrams | any `*kolosecure.Config`, used as given | Protocol: a reservation's connection to the relay must stay alive between sessions. Datagrams are off because the measurement showed no goodput gain under loss (below); a client opts in with `Transport.Datagrams` in a non-nil `Relay`, and uses them when the relay offers them (protocol.md). |
-| `Peer` (end-to-end connection) | nil: kolo-secure and kolo-transport defaults | any `*kolosecure.Config` | Documented in their repositories. |
+| `Peer` (end-to-end connection) | nil: kolo-secure and kolo-transport defaults | any `*kolosecure.Config` | Documented in their repositories. kolorelay sets `MaxConns`, `MaxConnsPerIP`, `MaxDialed` and `MaxPending` to 1: the inner listener holds one connection. |
 | `ControlTimeout` (each exchange with the relay) | 20s | 1s to 60s | Protocol: a Connect waits for the target's answer, so the client waits 5s longer than the relay's default 15s, for `AllowConnect` and two round trips. |
 | `MaxPending` (reservation: sessions not yet returned by `Accept`) | 16 | 1 to 256 | Memory: each waiting session holds an inner QUIC listener. |
 | `SendQueue` (packets queued per session; when full the oldest is dropped) | 512 | 8 to 1024 | Memory: at most about 726 KiB per session. |

@@ -26,6 +26,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The default relay listener (`ServerConfig.Secure` nil) offers QUIC datagrams (`Transport.Datagrams`); clients opt in: the default client connection to the relay (`Config.Relay` nil) does not, so it speaks version 0, and an application sets `Transport.Datagrams` in a non-nil `Config.Relay` to use the datagram path. A non-nil config is used as given. The measurement showed no goodput gain under 1% loss and 1.6 times without loss at the relay's 64 KiB window (docs/limits.md).
 - The end-to-end connection never offers QUIC datagrams of its own: `Transport.Datagrams` in `Config.Peer` is ignored, since its packets already travel as datagrams or frames to the relay.
 
+### Fixed
+
+- A `Config.Peer` with `MaxPending` above 1, as an application sets it for its own listener, no longer fails every Dial and every incoming session with kolo-secure's `ErrInvalidConfig` (MaxPending above the transport MaxConns): the end-to-end listener holds one connection, so kolorelay sets its `MaxPending` to 1.
+
 ## [0.1.0] - 2026-11-20
 
 ### Added
