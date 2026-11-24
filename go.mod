@@ -5,8 +5,8 @@ go 1.26.0
 require (
 	github.com/ciranda-dev/kolo-codec v0.1.0
 	github.com/ciranda-dev/kolo-id v0.1.0
-	github.com/ciranda-dev/kolo-secure v0.1.0
-	github.com/ciranda-dev/kolo-transport v0.1.0
+	github.com/ciranda-dev/kolo-secure v0.1.1
+	github.com/ciranda-dev/kolo-transport v0.1.1
 	golang.org/x/time v0.16.0
 )
 
