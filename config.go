@@ -20,7 +20,7 @@ type ServerConfig struct {
 	// MaxReservations caps the reserved keys. Default (listener MaxConns - MaxSessions) / 2, at least 1: a reservation holds up to two connections
 	// for a while after each lifetime end. There is no maximum.
 	MaxReservations int
-	// MaxSessions caps the sessions being set up or open. Default 16, from 1 to 10000.
+	// MaxSessions caps the sessions being set up or open. Default 16, or a quarter of the listener MaxConns if lower (at least 1), from 1 to 10000.
 	MaxSessions int
 	// MaxSessionsPerPeer caps the sessions one key has started. Default 4 or MaxSessions if lower, at most MaxSessions.
 	MaxSessionsPerPeer int
@@ -96,7 +96,7 @@ func (c *ServerConfig) withDefaults() (ServerConfig, error) {
 	if c != nil {
 		out = *c
 	}
-	if err := (limit[int]{"MaxSessions", 16, 1, 10000}).apply(&out.MaxSessions); err != nil {
+	if err := (limit[int]{"MaxSessions", max(1, min(16, listenerMaxConns(out.Secure)/4)), 1, 10000}).apply(&out.MaxSessions); err != nil {
 		return ServerConfig{}, err
 	}
 	errs := []error{
@@ -128,13 +128,20 @@ func (c *ServerConfig) withDefaults() (ServerConfig, error) {
 	case out.MaxReservations < 0:
 		return ServerConfig{}, fmt.Errorf("%w: MaxReservations must not be negative", ErrInvalidConfig)
 	case out.MaxReservations == 0:
-		conns := defaultMaxConns
-		if t := out.Secure.Transport; t != nil && t.MaxConns > 0 {
-			conns = t.MaxConns
-		}
-		out.MaxReservations = max(1, (conns-out.MaxSessions)/2)
+		out.MaxReservations = max(1, (listenerMaxConns(out.Secure)-out.MaxSessions)/2)
 	}
 	return out, nil
+}
+
+// listenerMaxConns is the MaxConns the listener gets from s, nil meaning the relay's own.
+func listenerMaxConns(s *kolosecure.Config) int {
+	if s == nil {
+		s = relaySecure()
+	}
+	if t := s.Transport; t != nil && t.MaxConns > 0 {
+		return t.MaxConns
+	}
+	return defaultMaxConns
 }
 
 // relaySecure is the relay's listener when ServerConfig.Secure is nil.
