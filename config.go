@@ -17,7 +17,8 @@ import (
 type ServerConfig struct {
 	// Secure configures the relay's listener. Nil means the relay defaults in the README, datagrams on; a non-nil value is used as given.
 	Secure *kolosecure.Config
-	// MaxReservations caps the reserved keys. Default 64, from 1 to 100000.
+	// MaxReservations caps the reserved keys. Default (listener MaxConns - MaxSessions) / 2, at least 1: a reservation holds up to two connections
+	// for a while after each lifetime end. There is no maximum.
 	MaxReservations int
 	// MaxSessions caps the sessions being set up or open. Default 16, from 1 to 10000.
 	MaxSessions int
@@ -99,7 +100,6 @@ func (c *ServerConfig) withDefaults() (ServerConfig, error) {
 		return ServerConfig{}, err
 	}
 	errs := []error{
-		limit[int]{"MaxReservations", 64, 1, 100000}.apply(&out.MaxReservations),
 		limit[int]{"MaxSessionsPerPeer", min(4, out.MaxSessions), 1, out.MaxSessions}.apply(&out.MaxSessionsPerPeer),
 		limit[int]{"MaxSessionsPerTarget", min(8, out.MaxSessions), 1, out.MaxSessions}.apply(&out.MaxSessionsPerTarget),
 		limit[time.Duration]{"ReservationLifetime", time.Hour, time.Second, 24 * time.Hour}.apply(&out.ReservationLifetime),
@@ -123,6 +123,16 @@ func (c *ServerConfig) withDefaults() (ServerConfig, error) {
 	}
 	if out.Secure == nil {
 		out.Secure = relaySecure()
+	}
+	switch {
+	case out.MaxReservations < 0:
+		return ServerConfig{}, fmt.Errorf("%w: MaxReservations must not be negative", ErrInvalidConfig)
+	case out.MaxReservations == 0:
+		conns := defaultMaxConns
+		if t := out.Secure.Transport; t != nil && t.MaxConns > 0 {
+			conns = t.MaxConns
+		}
+		out.MaxReservations = max(1, (conns-out.MaxSessions)/2)
 	}
 	return out, nil
 }
@@ -221,6 +231,9 @@ func (c Config) innerWait() time.Duration {
 }
 
 const defaultConnectTimeout = 15 * time.Second
+
+// defaultMaxConns is kolo-transport's default MaxConns, set here so MaxReservations knows it.
+const defaultMaxConns = 100
 
 // defaultHandshake is kolo-transport's and kolo-secure's default, set here so innerWait knows it.
 const defaultHandshake = 10 * time.Second

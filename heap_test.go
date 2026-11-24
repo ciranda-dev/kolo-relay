@@ -32,11 +32,11 @@ const (
 	heapChildEnv = "KOLORELAY_HEAP_CHILD"
 )
 
-// heapRelayConfig is the relay of the measurement: the defaults, with MaxConnsPerIP raised so every attacker can come from 127.0.0.1.
+// heapRelayConfig is the relay of the measurement: the defaults of the runs in docs/limits.md (64 reservations), with MaxConnsPerIP raised so every attacker can come from 127.0.0.1.
 func heapRelayConfig() *ServerConfig {
 	sec := relaySecure()
 	sec.Transport.MaxConnsPerIP = sec.Transport.MaxConns
-	return &ServerConfig{Secure: sec}
+	return &ServerConfig{Secure: sec, MaxReservations: 64}
 }
 
 // TestHeapRelay is the relay process that TestHeap attacks and measures; it runs only when TestHeap starts it.

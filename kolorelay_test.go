@@ -292,6 +292,19 @@ func TestMaxReservations(t *testing.T) {
 	}
 }
 
+func TestReservationsFollowConns(t *testing.T) {
+	checkGoroutines(t)
+	sec := relaySecure()
+	sec.Transport.MaxConns, sec.Transport.MaxConnsPerIP = 10, 10
+	r := startRelay(t, &ServerConfig{Secure: sec, MaxSessions: 2})
+	for range 4 {
+		reserve(t, r, newID(t), nil)
+	}
+	if _, err := Reserve(testCtx(t), r.addr, r.key, newID(t), nil); !errors.Is(err, ErrLimit) {
+		t.Fatalf("fifth key: %v, want ErrLimit at (10 - 2) / 2 = 4", err)
+	}
+}
+
 func TestReservationReplaced(t *testing.T) {
 	checkGoroutines(t)
 	r := startRelay(t, &ServerConfig{MaxReservations: 1})
