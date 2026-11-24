@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,6 +253,8 @@ const (
 	fakeReset             // answers OK to Connect, then resets the session stream
 	fakeForward           // terminates both sessions and forwards the target's own proof to the dialer
 	fakeForwardEnd        // as fakeForward, then ends the session stream right after the proof
+	fakeVersion0          // offers datagrams but, as kolo-relay v0.1.0, answers every version but 0 with UnsupportedVersion
+	fakeNoVersion         // offers datagrams and answers every request with UnsupportedVersion
 )
 
 type fakeRelay struct {
@@ -262,6 +265,9 @@ type fakeRelay struct {
 	mode int
 	addr string
 	key  ed25519.PublicKey
+
+	conns   atomic.Int64
+	refused atomic.Int64
 
 	mu      sync.Mutex
 	targets map[string]*kolosecure.Conn
@@ -275,7 +281,11 @@ type fakeRelay struct {
 func startFake(t *testing.T, mode int) *fakeRelay {
 	t.Helper()
 	id := newID(t)
-	sl, err := kolosecure.Listen(testCtx(t), "127.0.0.1:0", id, nil)
+	var cfg *kolosecure.Config
+	if mode == fakeVersion0 || mode == fakeNoVersion {
+		cfg = &kolosecure.Config{Transport: &kolotransport.Config{Datagrams: true}}
+	}
+	sl, err := kolosecure.Listen(testCtx(t), "127.0.0.1:0", id, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,6 +316,7 @@ func (f *fakeRelay) loop() {
 }
 
 func (f *fakeRelay) handle(c *kolosecure.Conn) {
+	f.conns.Add(1)
 	st, err := c.AcceptStream(f.ctx)
 	if err != nil {
 		return
@@ -316,6 +327,16 @@ func (f *fakeRelay) handle(c *kolosecure.Conn) {
 	}
 	m, err := wire.Decode(body)
 	if err != nil {
+		return
+	}
+	if f.mode == fakeNoVersion || (f.mode == fakeVersion0 && m.Version != wire.Version0) {
+		f.refused.Add(1)
+		wire.WriteMessage(st, wire.EncodeStatus(wire.StatusUnsupportedVersion))
+		select {
+		case <-c.Context().Done():
+		case <-f.ctx.Done():
+		}
+		c.Close()
 		return
 	}
 	switch m.Type {
@@ -345,7 +366,7 @@ func (f *fakeRelay) open(target []byte, announce []byte) *kolotransport.Stream {
 	if err != nil {
 		return nil
 	}
-	wire.WriteMessage(ts, wire.EncodeIncoming(announce))
+	wire.WriteMessage(ts, wire.EncodeIncoming(wire.Version0, announce))
 	body, err := wire.ReadMessage(ts)
 	if m, derr := wire.Decode(body); err != nil || derr != nil || m.Code != wire.StatusOK {
 		return nil
@@ -427,7 +448,7 @@ func (f *fakeRelay) mitm(c *kolosecure.Conn, st *kolotransport.Stream, target, i
 	ctx, cancel := context.WithTimeout(f.ctx, 20*time.Second)
 	defer cancel()
 
-	towardDialer, err := kolotransport.ListenConn(ctx, pconn.New(st, la, ra, 64), &kolotransport.Config{MaxConns: 1})
+	towardDialer, err := kolotransport.ListenConn(ctx, pconn.New(st, la, ra, 64, nil), &kolotransport.Config{MaxConns: 1})
 	if err != nil {
 		f.results <- err
 		return
@@ -439,7 +460,7 @@ func (f *fakeRelay) mitm(c *kolosecure.Conn, st *kolotransport.Stream, target, i
 	}
 	defer sd.Close()
 	deny := &kolotransport.Config{MaxConns: 1, AcceptFunc: func(netip.AddrPort) bool { return false }}
-	towardTarget, err := kolotransport.ListenConn(ctx, pconn.New(ts, la, ra, 64), deny)
+	towardTarget, err := kolotransport.ListenConn(ctx, pconn.New(ts, la, ra, 64, nil), deny)
 	if err != nil {
 		f.results <- err
 		return
@@ -492,13 +513,13 @@ func (f *fakeRelay) forward(c *kolosecure.Conn, st *kolotransport.Stream, target
 	ctx, cancel := context.WithTimeout(f.ctx, 20*time.Second)
 	defer cancel()
 	sig := &signalStream{Stream: st, writes: make(chan struct{}, 1)}
-	towardDialer, err := kolotransport.ListenConn(ctx, pconn.New(sig, la, ra, 64), &kolotransport.Config{MaxConns: 1})
+	towardDialer, err := kolotransport.ListenConn(ctx, pconn.New(sig, la, ra, 64, nil), &kolotransport.Config{MaxConns: 1})
 	if err != nil {
 		return
 	}
 	defer towardDialer.Close()
 	deny := &kolotransport.Config{MaxConns: 1, AcceptFunc: func(netip.AddrPort) bool { return false }}
-	towardTarget, err := kolotransport.ListenConn(ctx, pconn.New(ts, la, ra, 64), deny)
+	towardTarget, err := kolotransport.ListenConn(ctx, pconn.New(ts, la, ra, 64, nil), deny)
 	if err != nil {
 		return
 	}

@@ -137,8 +137,17 @@ func (s *Server) serveAs(c *kolosecure.Conn, remote []byte) {
 		c.CloseWithError(codeProtocol, "")
 		return
 	}
+	// The router also drains the datagrams of a client that sends them outside a session.
+	rt := newRouter(c)
+	if rt != nil {
+		s.wg.Go(rt.run)
+	}
 	st, m, ok := s.first(c)
 	if !ok {
+		return
+	}
+	if m.Version == wire.Version1 && rt == nil {
+		s.refuse(c, st, wire.StatusUnsupportedVersion)
 		return
 	}
 	s.wg.Go(func() {
@@ -148,9 +157,9 @@ func (s *Server) serveAs(c *kolosecure.Conn, remote []byte) {
 	})
 	switch m.Type {
 	case wire.TypeReserve:
-		s.reserve(c, st, key)
+		s.reserve(c, st, key, m.Version, rt)
 	case wire.TypeConnect:
-		s.connect(c, st, key, m.Key)
+		s.connect(&caller{conn: c, st: st, key: key, version: m.Version, router: rt}, m.Key)
 	default:
 		c.CloseWithError(codeProtocol, "")
 	}
@@ -223,12 +232,13 @@ func (s *Server) writeStatus(st *kolotransport.Stream, code uint64) error {
 	return err
 }
 
-func (s *Server) reserve(c *kolosecure.Conn, st *kolotransport.Stream, key limits.Key) {
+func (s *Server) reserve(c *kolosecure.Conn, st *kolotransport.Stream, key limits.Key, version uint64, rt *router) {
 	if f := s.cfg.AllowReserve; f != nil && !guard(func() bool { return f(bytes.Clone(key[:])) }) {
 		s.refuse(c, st, wire.StatusNotAllowed)
 		return
 	}
-	r := &reservation{conn: c, bucket: limits.Bucket(s.cfg.RateBytes, s.cfg.RateBurst), endc: make(chan uint64, 1), idle: make(chan struct{})}
+	r := &reservation{conn: c, version: version, router: rt, bucket: limits.Bucket(s.cfg.RateBytes, s.cfg.RateBurst),
+		endc: make(chan uint64, 1), idle: make(chan struct{})}
 	prev, replaced, err := s.table.Reserve(key, r)
 	if err != nil {
 		s.refuse(c, st, wire.StatusLimit)
@@ -279,7 +289,17 @@ func (s *Server) reserve(c *kolosecure.Conn, st *kolotransport.Stream, key limit
 	}
 }
 
-func (s *Server) connect(c *kolosecure.Conn, st *kolotransport.Stream, from limits.Key, target []byte) {
+// caller is an initiator's connection and its Connect.
+type caller struct {
+	conn    *kolosecure.Conn
+	st      *kolotransport.Stream
+	key     limits.Key
+	version uint64
+	router  *router
+}
+
+func (s *Server) connect(cl *caller, target []byte) {
+	c, st, from := cl.conn, cl.st, cl.key
 	s.at("connect")
 	s.sessMu.Lock()
 	if s.closing {
@@ -299,13 +319,14 @@ func (s *Server) connect(c *kolosecure.Conn, st *kolotransport.Stream, from limi
 		return
 	}
 	// session has released its slot before refuse waits for the client.
-	if code, ran := s.session(c, st, from, to); !ran {
+	if code, ran := s.session(cl, to); !ran {
 		s.refuse(c, st, code)
 	}
 }
 
 // session holds a slot from OpenSession to the end of the splice; if the session did not start, it returns the status to refuse with.
-func (s *Server) session(c *kolosecure.Conn, st *kolotransport.Stream, from, to limits.Key) (code uint64, ran bool) {
+func (s *Server) session(cl *caller, to limits.Key) (code uint64, ran bool) {
+	c, st, from := cl.conn, cl.st, cl.key
 	// The limits come first, so a peer at its limit learns nothing about AllowConnect or a reservation.
 	if s.table.AtLimit(from) != nil {
 		return wire.StatusLimit, false
@@ -332,9 +353,20 @@ func (s *Server) session(c *kolosecure.Conn, st *kolotransport.Stream, from, to 
 		return wire.StatusUnavailable, false
 	}
 	defer r.doneSession()
-	ts := s.announce(r, from)
+	packets := cl.version == wire.Version1 || r.version == wire.Version1
+	ts, tl := s.announce(r, from, packets)
 	if ts == nil {
 		return wire.StatusUnavailable, false
+	}
+	if r.version == wire.Version1 {
+		defer r.router.remove(quarterID(ts))
+	}
+	var il *splice.Leg
+	if packets {
+		il = newLeg(st, limits.Bucket(s.cfg.RateBytes, s.cfg.RateBurst), c, cl.version, cl.router)
+		if cl.version == wire.Version1 {
+			defer cl.router.remove(quarterID(st))
+		}
 	}
 	s.at("session-accept")
 	if !s.accept(c, st) {
@@ -346,7 +378,11 @@ func (s *Server) session(c *kolosecure.Conn, st *kolotransport.Stream, from, to 
 		ts.CancelRead(code)
 		return 0, true
 	}
-	splice.Run(s.sessCtx, st, ts, limits.Bucket(s.cfg.RateBytes, s.cfg.RateBurst), r.bucket, s.cfg.spliceLimits())
+	if packets {
+		splice.Packets(s.sessCtx, il, tl, s.cfg.spliceLimits())
+	} else {
+		splice.Run(s.sessCtx, st, ts, limits.Bucket(s.cfg.RateBytes, s.cfg.RateBurst), r.bucket, s.cfg.spliceLimits())
+	}
 	// Let the client read the session's end code and close the connection itself.
 	t := time.NewTimer(endGrace)
 	defer t.Stop()
@@ -357,8 +393,20 @@ func (s *Server) session(c *kolosecure.Conn, st *kolotransport.Stream, from, to 
 	return 0, true
 }
 
-// announce opens a stream to the target, sends Incoming and waits for its OK, within ConnectTimeout.
-func (s *Server) announce(r *reservation, from limits.Key) *kolotransport.Stream {
+// newLeg returns the packet leg of a client's session stream st; a version 1 leg sends datagrams on c, and rt routes the
+// client's datagrams to it.
+func newLeg(st *kolotransport.Stream, bucket *rate.Limiter, c *kolosecure.Conn, version uint64, rt *router) *splice.Leg {
+	if version != wire.Version1 {
+		return splice.NewLeg(st, bucket, nil, 0)
+	}
+	l := splice.NewLeg(st, bucket, c.SendDatagram, quarterID(st))
+	rt.add(quarterID(st), l)
+	return l
+}
+
+// announce opens a stream to the target, sends Incoming in the target's version and waits for its OK, within
+// ConnectTimeout. For a packet session it also returns the target's leg, routed before Incoming.
+func (s *Server) announce(r *reservation, from limits.Key, packets bool) (*kolotransport.Stream, *splice.Leg) {
 	dl := time.Now().Add(s.cfg.ConnectTimeout)
 	ctx, cancel := context.WithDeadline(r.conn.Context(), dl)
 	defer cancel()
@@ -366,7 +414,11 @@ func (s *Server) announce(r *reservation, from limits.Key) *kolotransport.Stream
 	defer stop()
 	ts, err := r.conn.OpenStream(ctx)
 	if err != nil {
-		return nil
+		return nil, nil
+	}
+	var tl *splice.Leg
+	if packets {
+		tl = newLeg(ts, r.bucket, r.conn, r.version, r.router)
 	}
 	stopTS := context.AfterFunc(s.sessCtx, func() {
 		ts.CancelWrite(splice.EndClosing)
@@ -374,26 +426,31 @@ func (s *Server) announce(r *reservation, from limits.Key) *kolotransport.Stream
 	})
 	defer stopTS()
 	ts.SetDeadline(dl)
-	ok := wire.WriteMessage(ts, wire.EncodeIncoming(from[:])) == nil
+	ok := wire.WriteMessage(ts, wire.EncodeIncoming(r.version, from[:])) == nil
 	if ok {
 		body, err := wire.ReadMessage(ts)
 		m, derr := wire.Decode(body)
 		ok = err == nil && derr == nil && m.Type == wire.TypeStatus && m.Code == wire.StatusOK
 	}
 	if !ok {
+		if r.version == wire.Version1 {
+			r.router.remove(quarterID(ts))
+		}
 		ts.CancelWrite(codeProtocol)
 		ts.CancelRead(codeProtocol)
-		return nil
+		return nil, nil
 	}
 	ts.SetDeadline(time.Time{})
-	return ts
+	return ts, tl
 }
 
 // reservation is one reserved key on the relay, held by one client connection.
 type reservation struct {
-	conn   *kolosecure.Conn
-	bucket *rate.Limiter
-	endc   chan uint64
+	conn    *kolosecure.Conn
+	version uint64
+	router  *router
+	bucket  *rate.Limiter
+	endc    chan uint64
 
 	mu       sync.Mutex
 	stopped  bool

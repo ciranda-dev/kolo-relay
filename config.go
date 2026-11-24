@@ -15,7 +15,7 @@ import (
 
 // ServerConfig sets the limits of a relay. A zero field takes its default.
 type ServerConfig struct {
-	// Secure configures the relay's listener. Nil means the relay defaults in the README; a non-nil value is used as given.
+	// Secure configures the relay's listener. Nil means the relay defaults in the README, datagrams on; a non-nil value is used as given.
 	Secure *kolosecure.Config
 	// MaxReservations caps the reserved keys. Default 64, from 1 to 100000.
 	MaxReservations int
@@ -58,7 +58,9 @@ type ServerConfig struct {
 
 // Config sets the limits of a peer that reserves on a relay or dials through one. A zero field takes its default.
 type Config struct {
-	// Relay configures the connection to the relay. Nil means kolo-secure's defaults with a 5s keep-alive; a non-nil value is used as given.
+	// Relay configures the connection to the relay. Nil means kolo-secure's defaults with a 5s keep-alive and no datagrams;
+	// a non-nil value is used as given. The client sends packets as datagrams when Relay.Transport.Datagrams is set and
+	// the relay offers them.
 	Relay *kolosecure.Config
 	// Peer configures the end-to-end connection. Nil means the defaults; kolorelay sets the listener-only transport fields.
 	Peer *kolosecure.Config
@@ -134,6 +136,7 @@ func relaySecure() *kolosecure.Config {
 		MaxIncomingStreams:     2,
 		MaxStreamReceiveWindow: 64 << 10,
 		MaxConnReceiveWindow:   256 << 10,
+		Datagrams:              true,
 	}}
 }
 
@@ -203,7 +206,8 @@ func (c Config) inner(accept bool) (*kolotransport.Config, *kolosecure.Config) {
 	if t.HandshakeTimeout == 0 {
 		t.HandshakeTimeout = defaultHandshake
 	}
-	t.MaxConns, t.MaxConnsPerIP, t.MaxDialed, t.AcceptFunc = 1, 1, 1, nil
+	// Inner packets already travel as datagrams or frames to the relay; the inner connection carries none of its own.
+	t.MaxConns, t.MaxConnsPerIP, t.MaxDialed, t.AcceptFunc, t.Datagrams = 1, 1, 1, nil, false
 	if !accept {
 		t.AcceptFunc = func(netip.AddrPort) bool { return false }
 	}

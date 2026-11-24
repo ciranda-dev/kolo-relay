@@ -78,6 +78,120 @@ func checkKey(name string, k ed25519.PublicKey) error {
 	return nil
 }
 
+// deliverer takes the packets of one session that arrived as datagrams.
+type deliverer interface{ Deliver(p []byte) }
+
+// router hands the datagrams of one relay connection to its sessions by quarter stream ID and drops the others,
+// since datagrams can arrive after a session ended.
+type router struct {
+	c    *kolosecure.Conn
+	mu   sync.Mutex
+	legs map[uint64]deliverer
+}
+
+// newRouter returns c's router, or nil if c does not support datagrams; run reads them until c ends.
+func newRouter(c *kolosecure.Conn) *router {
+	if !c.SupportsDatagrams() {
+		return nil
+	}
+	return &router{c: c, legs: make(map[uint64]deliverer)}
+}
+
+func (r *router) run() {
+	for {
+		b, err := r.c.ReceiveDatagram(r.c.Context())
+		if err != nil {
+			return
+		}
+		id, p, err := wire.DecodeDatagram(b)
+		if err != nil {
+			continue
+		}
+		r.mu.Lock()
+		l := r.legs[id]
+		r.mu.Unlock()
+		if l != nil {
+			l.Deliver(p)
+		}
+	}
+}
+
+func (r *router) add(id uint64, l deliverer) {
+	r.mu.Lock()
+	r.legs[id] = l
+	r.mu.Unlock()
+}
+
+func (r *router) remove(id uint64) {
+	r.mu.Lock()
+	delete(r.legs, id)
+	r.mu.Unlock()
+}
+
+// quarterID is the quarter stream ID of st (RFC 9297 section 2.1), which tags its session's datagrams.
+func quarterID(st *kolotransport.Stream) uint64 { return st.ID() / 4 }
+
+// relayConn is a connection to the relay whose control stream st got an OK to a request in version.
+type relayConn struct {
+	rc           *kolosecure.Conn
+	st           *kolotransport.Stream
+	version      uint64
+	relay, local *net.UDPAddr
+}
+
+// router returns the router of a version 1 connection, or nil.
+func (r relayConn) router() *router {
+	if r.version != wire.Version1 {
+		return nil
+	}
+	return newRouter(r.rc)
+}
+
+// request dials the relay and sends the request msg encodes, in version 1 when the connection carries datagrams.
+// A relay that offers datagrams but answers version 1 with UnsupportedVersion speaks only version 0, so the request
+// goes once more in version 0, on a new connection.
+func request(ctx context.Context, relayAddr string, relayKey ed25519.PublicKey, id *koloid.Identity, c Config, msg func(version uint64) []byte) (relayConn, error) {
+	r, err := requestIn(ctx, relayAddr, relayKey, id, c, msg, true)
+	if errors.Is(err, ErrUnsupportedVersion) && r.version == wire.Version1 {
+		r, err = requestIn(ctx, relayAddr, relayKey, id, c, msg, false)
+	}
+	return r, err
+}
+
+func requestIn(ctx context.Context, relayAddr string, relayKey ed25519.PublicKey, id *koloid.Identity, c Config, msg func(uint64) []byte, datagrams bool) (relayConn, error) {
+	rc, err := kolosecure.Dial(ctx, relayAddr, id, relayKey, c.Relay)
+	if err != nil {
+		return relayConn{}, err
+	}
+	r := relayConn{rc: rc, version: wire.Version0}
+	if datagrams && rc.SupportsDatagrams() {
+		r.version = wire.Version1
+	}
+	if r.relay, r.local, err = relayAddrs(rc); err == nil {
+		if r.st, err = control(ctx, rc, msg(r.version), c.ControlTimeout); err == nil {
+			return r, nil
+		}
+	}
+	rc.Close()
+	return relayConn{version: r.version}, err
+}
+
+// sessionConn returns the packet conn of a session on st; with rt it sends datagrams and rt routes them to it until
+// the stream ends.
+func sessionConn(st *kolotransport.Stream, rt *router, rc *kolosecure.Conn, local, remote *net.UDPAddr, queue int) *pconn.Conn {
+	if rt == nil {
+		return pconn.New(st, local, remote, queue, nil)
+	}
+	id := quarterID(st)
+	pc := pconn.New(st, local, remote, queue, &pconn.Datagrams{Send: rc.SendDatagram, ID: id})
+	rt.add(id, pc)
+	go func() {
+		<-pc.Done()
+		rt.remove(id)
+	}()
+	return pc
+}
+
 // control opens the control stream on rc, sends msg and waits for the relay's status, within timeout.
 func control(ctx context.Context, rc *kolosecure.Conn, msg []byte, timeout time.Duration) (*kolotransport.Stream, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
@@ -184,28 +298,26 @@ func Dial(ctx context.Context, relayAddr string, relayKey ed25519.PublicKey, id 
 	if err := checkAddr("relay address", relayAddr); err != nil {
 		return nil, err
 	}
-	rc, err := kolosecure.Dial(ctx, relayAddr, id, relayKey, c.Relay)
+	target = bytes.Clone(target)
+	r, err := request(ctx, relayAddr, relayKey, id, c, func(v uint64) []byte { return wire.EncodeConnect(v, target) })
 	if err != nil {
 		return nil, err
 	}
-	conn, err := dialThrough(ctx, rc, id, bytes.Clone(relayKey), bytes.Clone(target), c)
+	conn, err := dialThrough(ctx, r, id, bytes.Clone(relayKey), target, c)
 	if err != nil {
-		rc.Close()
+		r.rc.Close()
 		return nil, err
 	}
 	return conn, nil
 }
 
-func dialThrough(ctx context.Context, rc *kolosecure.Conn, id *koloid.Identity, relayKey, target ed25519.PublicKey, c Config) (*Conn, error) {
-	relay, local, err := relayAddrs(rc)
-	if err != nil {
-		return nil, err
+func dialThrough(ctx context.Context, r relayConn, id *koloid.Identity, relayKey, target ed25519.PublicKey, c Config) (*Conn, error) {
+	rc, relay := r.rc, r.relay
+	rt := r.router()
+	if rt != nil {
+		go rt.run()
 	}
-	st, err := control(ctx, rc, wire.EncodeConnect(target), c.ControlTimeout)
-	if err != nil {
-		return nil, err
-	}
-	pc := pconn.New(st, cloneUDP(local), cloneUDP(relay), c.SendQueue)
+	pc := sessionConn(r.st, rt, rc, cloneUDP(r.local), cloneUDP(relay), c.SendQueue)
 	hctx, cancel := endWith(ctx, pc)
 	defer cancel()
 	// When the relay or the target ends the stream, the handshake fails with hctx's error; report the session's end instead.
@@ -239,6 +351,7 @@ type Reservation struct {
 	relayKey  ed25519.PublicKey
 	relay     *net.UDPAddr
 	local     *net.UDPAddr
+	router    *router
 	slots     chan struct{}
 	ready     chan *Conn
 	ended     chan struct{}
@@ -271,25 +384,17 @@ func Reserve(ctx context.Context, relayAddr string, relayKey ed25519.PublicKey, 
 	if err := checkAddr("relay address", relayAddr); err != nil {
 		return nil, err
 	}
-	rc, err := kolosecure.Dial(ctx, relayAddr, id, relayKey, c.Relay)
+	r, err := request(ctx, relayAddr, relayKey, id, c, wire.EncodeReserve)
 	if err != nil {
 		return nil, err
 	}
-	relay, local, err := relayAddrs(rc)
-	if err == nil {
-		var st *kolotransport.Stream
-		if st, err = control(ctx, rc, wire.EncodeReserve(), c.ControlTimeout); err == nil {
-			return newReservation(rc, st, id, c, bytes.Clone(relayKey), relay, local), nil
-		}
-	}
-	rc.Close()
-	return nil, err
+	return newReservation(r, id, c, bytes.Clone(relayKey)), nil
 }
 
-func newReservation(rc *kolosecure.Conn, st *kolotransport.Stream, id *koloid.Identity, c Config, relayKey ed25519.PublicKey, relay, local *net.UDPAddr) *Reservation {
+func newReservation(rc relayConn, id *koloid.Identity, c Config, relayKey ed25519.PublicKey) *Reservation {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Reservation{
-		rc: rc, ctl: st, id: id, cfg: c, relayKey: relayKey, relay: relay, local: local,
+		rc: rc.rc, ctl: rc.st, id: id, cfg: c, relayKey: relayKey, relay: rc.relay, local: rc.local, router: rc.router(),
 		slots:  make(chan struct{}, c.MaxPending),
 		ready:  make(chan *Conn),
 		ended:  make(chan struct{}),
@@ -300,6 +405,9 @@ func newReservation(rc *kolosecure.Conn, st *kolotransport.Stream, id *koloid.Id
 	}
 	r.wg.Go(r.watch)
 	r.wg.Go(r.loop)
+	if r.router != nil {
+		r.wg.Go(r.router.run)
+	}
 	return r
 }
 
@@ -386,12 +494,19 @@ func (r *Reservation) serve(ts *kolotransport.Stream) {
 			r.doneActive()
 		}
 	}()
+	// A version 1 session's datagrams can follow the OK, so its route exists before.
+	rt := r.router
+	if m.Version != wire.Version1 {
+		rt = nil
+	}
+	pc := sessionConn(ts, rt, r.rc, cloneUDP(r.local), cloneUDP(r.relay), r.cfg.SendQueue)
 	if wire.WriteMessage(ts, wire.EncodeStatus(wire.StatusOK)) != nil {
 		ts.CancelRead(codeProtocol)
+		pc.Close()
 		return
 	}
 	ts.SetDeadline(time.Time{})
-	conn := r.handshake(ts, initiator)
+	conn := r.handshake(pc, initiator)
 	if conn == nil {
 		return
 	}
@@ -411,10 +526,9 @@ func (r *Reservation) serve(ts *kolotransport.Stream) {
 	}
 }
 
-func (r *Reservation) handshake(ts *kolotransport.Stream, initiator ed25519.PublicKey) *Conn {
+func (r *Reservation) handshake(pc *pconn.Conn, initiator ed25519.PublicKey) *Conn {
 	ctx, cancel := context.WithTimeout(r.ctx, r.cfg.innerWait())
 	defer cancel()
-	pc := pconn.New(ts, cloneUDP(r.local), cloneUDP(r.relay), r.cfg.SendQueue)
 	ctx, cancel2 := endWith(ctx, pc)
 	defer cancel2()
 	tcfg, scfg := r.cfg.inner(true)

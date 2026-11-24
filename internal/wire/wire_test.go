@@ -14,9 +14,12 @@ func TestRoundTrip(t *testing.T) {
 		body []byte
 		want Message
 	}{
-		{EncodeReserve(), Message{Type: TypeReserve}},
-		{EncodeConnect(key(1)), Message{Type: TypeConnect, Key: key(1)}},
-		{EncodeIncoming(key(2)), Message{Type: TypeIncoming, Key: key(2)}},
+		{EncodeReserve(Version0), Message{Type: TypeReserve}},
+		{EncodeConnect(Version0, key(1)), Message{Type: TypeConnect, Key: key(1)}},
+		{EncodeIncoming(Version0, key(2)), Message{Type: TypeIncoming, Key: key(2)}},
+		{EncodeReserve(Version1), Message{Type: TypeReserve, Version: Version1}},
+		{EncodeConnect(Version1, key(3)), Message{Type: TypeConnect, Version: Version1, Key: key(3)}},
+		{EncodeIncoming(Version1, key(4)), Message{Type: TypeIncoming, Version: Version1, Key: key(4)}},
 		{EncodeStatus(StatusOK), Message{Type: TypeStatus, Code: StatusOK}},
 		{EncodeStatus(StatusUnsupportedVersion), Message{Type: TypeStatus, Code: StatusUnsupportedVersion}},
 	}
@@ -33,7 +36,7 @@ func TestRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Decode(%x): %v", body, err)
 		}
-		if got.Type != c.want.Type || got.Code != c.want.Code || !bytes.Equal(got.Key, c.want.Key) {
+		if got.Type != c.want.Type || got.Version != c.want.Version || got.Code != c.want.Code || !bytes.Equal(got.Key, c.want.Key) {
 			t.Fatalf("got %+v, want %+v", got, c.want)
 		}
 		if buf.Len() != 0 {
@@ -43,20 +46,22 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestFormats(t *testing.T) {
-	if got, want := EncodeReserve(), []byte{1, 0}; !bytes.Equal(got, want) {
-		t.Fatalf("Reserve %x, want %x", got, want)
-	}
-	if got, want := EncodeConnect(key(7)), append([]byte{2, 0}, key(7)...); !bytes.Equal(got, want) {
-		t.Fatalf("Connect %x, want %x", got, want)
-	}
-	if got, want := EncodeIncoming(key(7)), append([]byte{3, 0}, key(7)...); !bytes.Equal(got, want) {
-		t.Fatalf("Incoming %x, want %x", got, want)
+	for _, v := range []uint64{Version0, Version1} {
+		if got, want := EncodeReserve(v), []byte{1, byte(v)}; !bytes.Equal(got, want) {
+			t.Fatalf("Reserve %x, want %x", got, want)
+		}
+		if got, want := EncodeConnect(v, key(7)), append([]byte{2, byte(v)}, key(7)...); !bytes.Equal(got, want) {
+			t.Fatalf("Connect %x, want %x", got, want)
+		}
+		if got, want := EncodeIncoming(v, key(7)), append([]byte{3, byte(v)}, key(7)...); !bytes.Equal(got, want) {
+			t.Fatalf("Incoming %x, want %x", got, want)
+		}
 	}
 	if got, want := EncodeStatus(StatusLimit), []byte{4, 3}; !bytes.Equal(got, want) {
 		t.Fatalf("Status %x, want %x", got, want)
 	}
 	var buf bytes.Buffer
-	if err := WriteMessage(&buf, EncodeReserve()); err != nil {
+	if err := WriteMessage(&buf, EncodeReserve(Version0)); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := buf.Bytes(), []byte{2, 1, 0}; !bytes.Equal(got, want) {
@@ -76,11 +81,16 @@ func TestDecodeErrors(t *testing.T) {
 		{"type zero", []byte{0, 0}, ErrProtocol},
 		{"non-canonical type", []byte{0x81, 0x00, 0}, ErrProtocol},
 		{"reserve no version", []byte{1}, ErrProtocol},
-		{"reserve version 1", []byte{1, 1}, ErrUnsupportedVersion},
+		{"reserve version 2", []byte{1, 2}, ErrUnsupportedVersion},
 		{"reserve trailing", []byte{1, 0, 0}, ErrProtocol},
+		{"reserve v1 trailing", []byte{1, 1, 0}, ErrProtocol},
+		{"reserve non-canonical version", []byte{1, 0x81, 0x00}, ErrProtocol},
 		{"connect short key", long[:len(long)-1], ErrProtocol},
 		{"connect trailing", append(long, 0), ErrProtocol},
-		{"connect version 1", append([]byte{2, 1}, key(1)...), ErrUnsupportedVersion},
+		{"connect version 2", append([]byte{2, 2}, key(1)...), ErrUnsupportedVersion},
+		{"connect version 2 short key", []byte{2, 2}, ErrUnsupportedVersion},
+		{"incoming large version", []byte{3, 0x80, 0x01}, ErrUnsupportedVersion},
+		{"connect v1 short key", append([]byte{2, 1}, key(1)[1:]...), ErrProtocol},
 		{"incoming no key", []byte{3, 0}, ErrProtocol},
 		{"status no code", []byte{4}, ErrProtocol},
 		{"status unknown code", []byte{4, 5}, ErrProtocol},
@@ -237,5 +247,85 @@ func TestReadErrorsPassThrough(t *testing.T) {
 	}
 	if _, err := NewPacketReader(errReader{boom}).Read(make([]byte, 10)); !errors.Is(err, boom) {
 		t.Fatalf("PacketReader: %v", err)
+	}
+}
+
+func TestDatagramRoundTrip(t *testing.T) {
+	for _, id := range []uint64{0, 1, 127, 128, MaxQuarterStreamID} {
+		for _, n := range []int{1, 1200, MaxPacketSize} {
+			p := bytes.Repeat([]byte{byte(n)}, n)
+			b, err := AppendDatagram([]byte("x"), id, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gid, gp, err := DecodeDatagram(b[1:])
+			if err != nil || gid != id || !bytes.Equal(gp, p) {
+				t.Fatalf("id %d, %d bytes: got %d, %d bytes, %v", id, n, gid, len(gp), err)
+			}
+		}
+	}
+}
+
+func TestDatagramFormat(t *testing.T) {
+	b, err := AppendDatagram(nil, 200, []byte{0xaa, 0xbb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []byte{0xc8, 0x01, 0xaa, 0xbb}; !bytes.Equal(b, want) {
+		t.Fatalf("datagram %x, want %x", b, want)
+	}
+}
+
+func TestDatagramErrors(t *testing.T) {
+	for _, n := range []int{0, MaxPacketSize + 1} {
+		if _, err := AppendDatagram(nil, 1, make([]byte, n)); !errors.Is(err, ErrPacketSize) {
+			t.Errorf("append %d bytes: %v, want ErrPacketSize", n, err)
+		}
+	}
+	if _, err := AppendDatagram(nil, MaxQuarterStreamID+1, []byte{1}); !errors.Is(err, ErrProtocol) {
+		t.Errorf("append ID 2^60: %v, want ErrProtocol", err)
+	}
+	cases := []struct {
+		name string
+		in   []byte
+	}{
+		{"empty", nil},
+		{"ID only", []byte{5}},
+		{"truncated ID", []byte{0x80}},
+		{"non-canonical ID", []byte{0x81, 0x00, 1}},
+		{"ID 2^60", append([]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10}, 1)},
+		{"packet too long", append([]byte{1}, make([]byte, MaxPacketSize+1)...)},
+	}
+	for _, c := range cases {
+		if _, _, err := DecodeDatagram(c.in); !errors.Is(err, ErrProtocol) {
+			t.Errorf("%s: got %v, want ErrProtocol", c.name, err)
+		}
+	}
+}
+
+func TestDecodeDatagramDoesNotAllocate(t *testing.T) {
+	b, _ := AppendDatagram(nil, 300, make([]byte, MaxPacketSize))
+	long := append([]byte{1}, make([]byte, 4096)...)
+	if n := testing.AllocsPerRun(100, func() {
+		DecodeDatagram(b)
+		DecodeDatagram(long)
+	}); n != 0 {
+		t.Fatalf("%v allocations per decode", n)
+	}
+}
+
+func TestAppendFrameAndFrameSize(t *testing.T) {
+	for _, n := range []int{1, 127, 128, MaxPacketSize} {
+		b, err := AppendFrame([]byte("x"), make([]byte, n))
+		if err != nil || len(b)-1 != FrameSize(n) {
+			t.Fatalf("%d bytes: frame of %d, FrameSize %d, %v", n, len(b)-1, FrameSize(n), err)
+		}
+		got, err := NewPacketReader(bytes.NewReader(b[1:])).Read(make([]byte, MaxPacketSize))
+		if err != nil || got != n {
+			t.Fatalf("%d bytes: read %d %v", n, got, err)
+		}
+	}
+	if _, err := AppendFrame(nil, nil); !errors.Is(err, ErrPacketSize) {
+		t.Fatalf("empty: %v", err)
 	}
 }

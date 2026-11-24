@@ -274,16 +274,17 @@ type attacker struct {
 	key ed25519.PublicKey
 }
 
-func heapClientConfig(window int64) *kolosecure.Config {
+func heapClientConfig(window int64, datagrams bool) *kolosecure.Config {
 	return &kolosecure.Config{Transport: &kolotransport.Config{
 		IdleTimeout:            2 * time.Minute,
 		MaxStreamReceiveWindow: window,
 		MaxConnReceiveWindow:   2 * window,
+		Datagrams:              datagrams,
 	}}
 }
 
 // dialRelay connects a new key to the relay, trying again while the relay is busy with other handshakes.
-func dialRelay(addr string, relay ed25519.PublicKey, window int64) (*attacker, error) {
+func dialRelay(addr string, relay ed25519.PublicKey, window int64, datagrams bool) (*attacker, error) {
 	id, err := koloid.Generate()
 	if err != nil {
 		return nil, err
@@ -291,7 +292,7 @@ func dialRelay(addr string, relay ed25519.PublicKey, window int64) (*attacker, e
 	var c *kolosecure.Conn
 	for range 40 {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		c, err = kolosecure.Dial(ctx, addr, id, relay, heapClientConfig(window))
+		c, err = kolosecure.Dial(ctx, addr, id, relay, heapClientConfig(window, datagrams))
 		cancel()
 		if err == nil {
 			return &attacker{c: c, key: id.PublicKey()}, nil
@@ -301,9 +302,9 @@ func dialRelay(addr string, relay ed25519.PublicKey, window int64) (*attacker, e
 	return nil, fmt.Errorf("dial the relay: %w", err)
 }
 
-func heapDial(t *testing.T, addr string, relay ed25519.PublicKey, window int64) *attacker {
+func heapDial(t *testing.T, addr string, relay ed25519.PublicKey, window int64, datagrams bool) *attacker {
 	t.Helper()
-	a, err := dialRelay(addr, relay, window)
+	a, err := dialRelay(addr, relay, window, datagrams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,8 +314,8 @@ func heapDial(t *testing.T, addr string, relay ed25519.PublicKey, window int64) 
 
 func heapTarget(t *testing.T, addr string, relay ed25519.PublicKey, window int64) *attacker {
 	t.Helper()
-	tg := heapDial(t, addr, relay, window)
-	if code := rawStatus(t, rawSend(t, tg.c, wire.EncodeReserve())); code != wire.StatusOK {
+	tg := heapDial(t, addr, relay, window, false)
+	if code := rawStatus(t, rawSend(t, tg.c, wire.EncodeReserve(wire.Version0))); code != wire.StatusOK {
 		t.Fatalf("reserve: status %d", code)
 	}
 	return tg
@@ -347,8 +348,8 @@ func heapConnect(t *testing.T, iaddr string, tg *attacker, relay ed25519.PublicK
 		ts.SetDeadline(time.Time{})
 		got <- ts
 	}()
-	in := heapDial(t, iaddr, relay, window)
-	in.st = rawSend(t, in.c, wire.EncodeConnect(tg.key))
+	in := heapDial(t, iaddr, relay, window, false)
+	in.st = rawSend(t, in.c, wire.EncodeConnect(wire.Version0, tg.key))
 	if code := rawStatus(t, in.st); code != wire.StatusOK {
 		t.Fatalf("connect: status %d", code)
 	}
@@ -410,7 +411,7 @@ func waitBlocked(limit time.Duration) (int64, time.Duration) {
 
 // park holds a connection in its control phase: one byte of a Connect, then 1-byte frames on a stream the relay has not accepted.
 func park(wg *sync.WaitGroup, addr string, relay ed25519.PublicKey) (*attacker, error) {
-	a, err := dialRelay(addr, relay, 64<<10)
+	a, err := dialRelay(addr, relay, 64<<10, false)
 	if err != nil {
 		return nil, err
 	}
@@ -488,13 +489,17 @@ func TestHeap(t *testing.T) {
 	}
 	b := memoryBound(cfg)
 	conns, sessions := cfg.Secure.Transport.MaxConns, cfg.MaxSessions
-	t.Logf("defaults: MaxConns %d, MaxSessions %d, windows %d KiB; bound: %s per connection, %s per sending connection, receive %s, send %s, total %s",
-		conns, sessions, cfg.Secure.Transport.MaxConnReceiveWindow>>10, mib(b.conn), mib(b.sendConn), mib(b.receive), mib(b.send), mib(b.total))
+	t.Logf("defaults: MaxConns %d, MaxSessions %d, windows %d KiB; bound: %s per connection, %s per sending connection, receive %s, send %s, total %s, datagram step %s",
+		conns, sessions, cfg.Secure.Transport.MaxConnReceiveWindow>>10, mib(b.conn), mib(b.sendConn), mib(b.receive), mib(b.send), mib(b.total), mib(b.datagram))
 	h := startHeapRelay(t)
 	results := map[string]int64{}
 	phases := os.Getenv("KOLORELAY_HEAP_PHASES")
 	if phases == "" || strings.Contains(phases, "receive") {
 		results["idle"], results["receive"] = heapReceive(t, h, cfg)
+	}
+	// The send step's delayed acknowledgments hold its sessions on the relay after it ends, so the datagram step comes first.
+	if phases == "" || strings.Contains(phases, "datagram") {
+		results["datagram"] = heapDatagram(t, h, cfg)
 	}
 	if phases == "" || strings.Contains(phases, "send") {
 		results["send"], results["total"] = heapSend(t, h, cfg)
@@ -505,7 +510,7 @@ func TestHeap(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		bound int64
-	}{{"idle", b.idle}, {"receive", b.receive}, {"send per connection", b.sendConn}, {"send", b.send}, {"total", b.total}} {
+	}{{"idle", b.idle}, {"receive", b.receive}, {"send per connection", b.sendConn}, {"send", b.send}, {"total", b.total}, {"datagram", b.datagram}} {
 		got, ok := results[c.name]
 		if !ok {
 			continue
@@ -530,8 +535,8 @@ func heapReceive(t *testing.T, h *heapRelay, cfg ServerConfig) (idle, peak int64
 	base := h.base(t)
 	idleConns := min(conns, cfg.MaxReservations)
 	for range idleConns {
-		a := heapDial(t, h.addr, h.key, 64<<10)
-		if code := rawStatus(t, rawSend(t, a.c, wire.EncodeReserve())); code != wire.StatusOK {
+		a := heapDial(t, h.addr, h.key, 64<<10, false)
+		if code := rawStatus(t, rawSend(t, a.c, wire.EncodeReserve(wire.Version0))); code != wire.StatusOK {
 			t.Fatalf("reserve: status %d", code)
 		}
 		clients = append(clients, a)
@@ -656,7 +661,7 @@ func heapSend(t *testing.T, h *heapRelay, cfg ServerConfig) (send, total int64) 
 	return send, total
 }
 
-type bound struct{ idle, conn, sendConn, receive, send, total int64 }
+type bound struct{ idle, conn, sendConn, receive, send, total, datagram int64 }
 
 // memoryBound is the README's worst case for cfg, in bytes; 176 and 96 are kolo-transport's measured heap bytes per byte of window.
 func memoryBound(cfg ServerConfig) bound {
@@ -669,7 +674,130 @@ func memoryBound(cfg ServerConfig) bound {
 	// quic-go keeps at most 25000 sent packets per connection, each with a 1452-byte buffer per STREAM frame.
 	b.sendConn = 25000 * 1800
 	b.receive = conns*b.conn + (sessions-1)*tc.MaxStreamReceiveWindow*96 + 1024*1536 + 2*sessions*splice.BufferSize
+	if tc.Datagrams {
+		// quic-go's 128 received and 32 queued datagrams per connection, and each session direction's packet queue, in
+		// Go's 1536-byte size class.
+		b.conn += datagramConn
+		b.receive += conns*datagramConn + 2*sessions*splice.QueueSize*1536
+	}
 	b.send = 2 * sessions * b.sendConn
 	b.total = b.receive + b.send
+	// The datagram step: connections with full datagram queues and no stream data, every session's packet queues and copy
+	// buffers, and the send term of the half of the targets that get frames (datagrams are never kept for resending).
+	b.datagram = conns*(b.idle+datagramConn) + 2*sessions*(splice.QueueSize*1536+splice.BufferSize) + sessions/2*b.sendConn
 	return b
+}
+
+// datagramConn is the heap of a connection's full datagram queues: 128 received and 32 to send, 1536 bytes each.
+const datagramConn = (128 + 32) * 1536
+
+// heapDatagram floods the relay with datagrams: initiators send full-size ones for their sessions, whose targets read
+// neither their stream nor their datagrams, and reservations send them for sessions that do not exist.
+func heapDatagram(t *testing.T, h *heapRelay, cfg ServerConfig) int64 {
+	t.Helper()
+	conns, sessions := cfg.Secure.Transport.MaxConns, cfg.MaxSessions
+	// The relay may still be freeing the step before; a base taken too early would hide this step's heap.
+	base := h.base(t)
+	for range 20 {
+		time.Sleep(2 * time.Second)
+		next := h.base(t)
+		if next > base-1<<20 {
+			base = next
+			break
+		}
+		base = next
+	}
+	var sent atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var clients []*attacker
+	flood := func(a *attacker, id func() uint64) {
+		wg.Go(func() {
+			size := wire.MaxPacketSize
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				p, _ := wire.AppendDatagram(nil, id(), make([]byte, size))
+				switch err := a.c.SendDatagram(p); {
+				case err == nil:
+					sent.Add(1)
+				case errors.Is(err, kolotransport.ErrDatagramTooLarge):
+					size = max(size-8, 1)
+				case errors.Is(err, kolotransport.ErrDatagramDropped):
+					time.Sleep(100 * time.Microsecond)
+				default:
+					return
+				}
+			}
+		})
+	}
+	for i := range sessions {
+		// Every other target speaks version 0, so the relay queues frames towards a stream that is never read.
+		tg := heapDatagramClient(t, h, uint64(i%2*wire.Version1))
+		got := make(chan struct{})
+		go func() {
+			defer close(got)
+			ts, err := tg.c.AcceptStream(context.Background())
+			if err != nil {
+				return
+			}
+			ts.SetDeadline(time.Now().Add(10 * time.Second))
+			if _, err := wire.ReadMessage(ts); err == nil {
+				wire.WriteMessage(ts, wire.EncodeStatus(wire.StatusOK))
+			}
+		}()
+		// The relay may still be ending the sessions of the step before.
+		var in *attacker
+		for try := 0; ; try++ {
+			in = heapDial(t, h.addr, h.key, 64<<10, true)
+			in.st = rawSend(t, in.c, wire.EncodeConnect(wire.Version1, tg.key))
+			code := rawStatus(t, in.st)
+			if code == wire.StatusOK {
+				break
+			}
+			in.c.Close()
+			if code != wire.StatusLimit || try == 30 {
+				t.Fatalf("connect: status %d", code)
+			}
+			time.Sleep(time.Second)
+		}
+		<-got
+		clients = append(clients, tg, in)
+		qid := in.st.ID() / 4
+		flood(in, func() uint64 { return qid })
+	}
+	strays := min(conns-2*sessions, cfg.MaxReservations-sessions)
+	for i := range strays {
+		a := heapDatagramClient(t, h, wire.Version1)
+		clients = append(clients, a)
+		next := uint64(i) << 20
+		flood(a, func() uint64 {
+			next++
+			return next
+		})
+	}
+	time.Sleep(20 * time.Second)
+	peak := h.mark(t) - base
+	close(stop)
+	wg.Wait()
+	t.Logf("datagram: %d sessions and %d reservations sent %d datagrams in 20s, peak %s above the idle relay",
+		sessions, strays, sent.Load(), mib(peak))
+	for _, a := range clients {
+		a.c.Close()
+	}
+	time.Sleep(3 * time.Second)
+	return peak
+}
+
+// heapDatagramClient is a new key with datagrams that reserved on the relay in version.
+func heapDatagramClient(t *testing.T, h *heapRelay, version uint64) *attacker {
+	t.Helper()
+	a := heapDial(t, h.addr, h.key, 64<<10, true)
+	if code := rawStatus(t, rawSend(t, a.c, wire.EncodeReserve(version))); code != wire.StatusOK {
+		t.Fatalf("reserve: status %d", code)
+	}
+	return a
 }
