@@ -118,67 +118,73 @@ func TestManySessions(t *testing.T) {
 }
 
 func TestRelaySeesOnlyCiphertext(t *testing.T) {
-	checkGoroutines(t)
-	f := startFake(t, fakeRecord)
-	r := f.relay()
-	ic, _, _ := pair(t, r, nil)
-	secret := []byte("kolo-relay secret marker that must stay end to end")
-	echo(t, ic, bytes.Repeat(secret, 100))
-	seen := f.recorded()
-	if len(seen) < 100*len(secret) {
-		t.Fatalf("relay forwarded only %d bytes", len(seen))
-	}
-	if bytes.Contains(seen, secret[:16]) {
-		t.Fatal("the relay saw plaintext")
-	}
+	eachTransport(t, func(t *testing.T, datagrams bool, cfg *Config) {
+		f := startFakeWith(t, fakeRecord, datagrams)
+		r := f.relay()
+		ic, _, _ := pair(t, r, cfg)
+		secret := []byte("kolo-relay secret marker that must stay end to end")
+		echo(t, ic, bytes.Repeat(secret, 100))
+		seen := f.recorded()
+		if len(seen) < 100*len(secret) {
+			t.Fatalf("relay forwarded only %d bytes", len(seen))
+		}
+		if datagrams && f.forwarded.Load() == 0 {
+			t.Fatal("the relay forwarded no datagram")
+		}
+		if bytes.Contains(seen, secret[:16]) {
+			t.Fatal("the relay saw plaintext")
+		}
+	})
 }
 
 func TestLyingRelayIsDetected(t *testing.T) {
-	checkGoroutines(t)
-	f := startFake(t, fakeLie)
-	r := f.relay()
-	tid, iid := newID(t), newID(t)
-	res := reserve(t, r, tid, nil)
-	ic, err := Dial(testCtx(t), r.addr, r.key, iid, tid.PublicKey(), nil)
-	if err == nil {
-		defer ic.Close()
-		err = waitDone(t, ic.Context(), 10*time.Second)
-	}
-	if code, ok := closeCode(err); !errors.Is(err, kolotransport.ErrPeerClosed) || !ok || code != codeUnexpectedPeer {
-		t.Fatalf("dialer: %v, want the target to close with code %d", err, codeUnexpectedPeer)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if c, err := res.Accept(ctx); err == nil {
-		c.Close()
-		t.Fatal("the target accepted a peer the relay misnamed")
-	}
+	eachTransport(t, func(t *testing.T, datagrams bool, cfg *Config) {
+		f := startFakeWith(t, fakeLie, datagrams)
+		r := f.relay()
+		tid, iid := newID(t), newID(t)
+		res := reserve(t, r, tid, cfg)
+		ic, err := Dial(testCtx(t), r.addr, r.key, iid, tid.PublicKey(), cfg)
+		if err == nil {
+			defer ic.Close()
+			err = waitDone(t, ic.Context(), 10*time.Second)
+		}
+		if code, ok := closeCode(err); !errors.Is(err, kolotransport.ErrPeerClosed) || !ok || code != codeUnexpectedPeer {
+			t.Fatalf("dialer: %v, want the target to close with code %d", err, codeUnexpectedPeer)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if c, err := res.Accept(ctx); err == nil {
+			c.Close()
+			t.Fatal("the target accepted a peer the relay misnamed")
+		}
+	})
 }
 
 func TestMITMRelayIsDetected(t *testing.T) {
-	checkGoroutines(t)
-	f := startFake(t, fakeMITM)
-	r := f.relay()
-	tid, iid := newID(t), newID(t)
-	res := reserve(t, r, tid, nil)
-	_, err := Dial(testCtx(t), r.addr, r.key, iid, tid.PublicKey(), nil)
-	if !errors.Is(err, kolosecure.ErrUnexpectedPeer) {
-		t.Fatalf("dialer: %v, want kolosecure.ErrUnexpectedPeer", err)
-	}
-	select {
-	case err := <-f.results:
-		if code, ok := closeCode(err); !errors.Is(err, kolotransport.ErrPeerClosed) || !ok || code != codeUnexpectedPeer {
-			t.Fatalf("target side: %v, want the target to close with code %d", err, codeUnexpectedPeer)
+	eachTransport(t, func(t *testing.T, datagrams bool, cfg *Config) {
+		f := startFakeWith(t, fakeMITM, datagrams)
+		r := f.relay()
+		tid, iid := newID(t), newID(t)
+		res := reserve(t, r, tid, cfg)
+		_, err := Dial(testCtx(t), r.addr, r.key, iid, tid.PublicKey(), cfg)
+		if !errors.Is(err, kolosecure.ErrUnexpectedPeer) {
+			t.Fatalf("dialer: %v, want kolosecure.ErrUnexpectedPeer", err)
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("the man in the middle never finished its session with the target")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if c, err := res.Accept(ctx); err == nil {
-		c.Close()
-		t.Fatal("the target accepted the man in the middle")
-	}
+		select {
+		case err := <-f.results:
+			if code, ok := closeCode(err); !errors.Is(err, kolotransport.ErrPeerClosed) || !ok || code != codeUnexpectedPeer {
+				t.Fatalf("target side: %v, want the target to close with code %d", err, codeUnexpectedPeer)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("the man in the middle never finished its session with the target")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if c, err := res.Accept(ctx); err == nil {
+			c.Close()
+			t.Fatal("the target accepted the man in the middle")
+		}
+	})
 }
 
 func TestWrongRelayKey(t *testing.T) {
